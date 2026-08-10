@@ -217,6 +217,12 @@ async function askGemini(userMessage) {
   });
 
   const data = await response.json();
+
+  if (!response.ok || data.error) {
+    console.error("Gemini API error:", JSON.stringify(data.error || data));
+    return "Sorry, I'm having trouble responding right now — a team member will follow up shortly.";
+  }
+
   const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
   return reply || "Sorry, I'm having trouble responding right now — a team member will follow up shortly.";
 }
