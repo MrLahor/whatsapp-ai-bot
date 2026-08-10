@@ -202,7 +202,7 @@ async function sendInstagramMessage(recipientId, text) {
 
 // ====== 3. Ask Gemini for a reply ======
 async function askGemini(userMessage) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${GEMINI_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
 
   const response = await fetch(url, {
     method: "POST",
