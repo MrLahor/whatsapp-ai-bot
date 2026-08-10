@@ -118,6 +118,8 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`Message from ${from}: ${text}`);
 
+    await markAsReadAndTyping(message.id);
+
     const aiReply = await askGemini(text);
     await sendWhatsAppMessage(from, aiReply);
   } catch (err) {
@@ -144,6 +146,28 @@ async function askGemini(userMessage) {
   const data = await response.json();
   const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
   return reply || "Sorry, I'm having trouble responding right now — a team member will follow up shortly.";
+}
+
+// ====== 3.5 Show blue ticks + typing indicator while we prepare a reply ======
+async function markAsReadAndTyping(messageId) {
+  const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        status: "read",
+        message_id: messageId,
+        typing_indicator: { type: "text" },
+      }),
+    });
+  } catch (err) {
+    console.error("Failed to mark as read / show typing:", err);
+  }
 }
 
 // ====== 4. Send reply back via WhatsApp Cloud API ======
