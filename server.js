@@ -11,6 +11,13 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || "PASTE_YOUR_META_ACCESS_TOK
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "PASTE_YOUR_PHONE_NUMBER_ID_HERE";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "PASTE_YOUR_GEMINI_API_KEY_HERE";
 
+// ====== FACEBOOK MESSENGER ======
+const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "PASTE_YOUR_PAGE_ACCESS_TOKEN_HERE";
+
+// ====== INSTAGRAM ======
+const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN || "PASTE_YOUR_INSTAGRAM_ACCESS_TOKEN_HERE";
+const IG_ACCOUNT_ID = process.env.IG_ACCOUNT_ID || "PASTE_YOUR_INSTAGRAM_ACCOUNT_ID_HERE";
+
 // ====== NUMBERS TO NEVER AUTO-RESPOND TO ======
 // Add any number here (in international format, no + or spaces, e.g. "2348012345678")
 // and the bot will completely ignore messages from it — no AI reply, no log of content.
@@ -95,37 +102,103 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// ====== 2. Receiving incoming WhatsApp messages ======
+// ====== 2. Receiving incoming messages (WhatsApp, Messenger, or Instagram) ======
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200); // acknowledge immediately, Meta expects a fast response
 
   try {
-    const entry = req.body.entry?.[0];
-    const change = entry?.changes?.[0];
-    const message = change?.value?.messages?.[0];
+    const platform = req.body.object; // "whatsapp_business_account" | "page" | "instagram"
 
-    if (!message) return; // could be a status update, not a real message
-
-    const from = message.from; // customer's phone number
-    const text = message.text?.body;
-
-    if (!text) return; // ignore non-text messages for now
-
-    if (BLOCKED_NUMBERS.includes(from)) {
-      console.log(`Ignored message from blocked number ${from}`);
-      return; // silently do nothing — no AI reply sent
+    if (platform === "whatsapp_business_account") {
+      await handleWhatsApp(req.body);
+    } else if (platform === "page") {
+      await handleMessenger(req.body);
+    } else if (platform === "instagram") {
+      await handleInstagram(req.body);
     }
-
-    console.log(`Message from ${from}: ${text}`);
-
-    await markAsReadAndTyping(message.id);
-
-    const aiReply = await askGemini(text);
-    await sendWhatsAppMessage(from, aiReply);
   } catch (err) {
     console.error("Error handling incoming message:", err);
   }
 });
+
+// ---- WhatsApp ----
+async function handleWhatsApp(body) {
+  const entry = body.entry?.[0];
+  const change = entry?.changes?.[0];
+  const message = change?.value?.messages?.[0];
+  if (!message) return;
+
+  const from = message.from;
+  const text = message.text?.body;
+  if (!text) return;
+
+  if (BLOCKED_NUMBERS.includes(from)) {
+    console.log(`Ignored WhatsApp message from blocked number ${from}`);
+    return;
+  }
+
+  console.log(`WhatsApp message from ${from}: ${text}`);
+  await markAsReadAndTyping(message.id);
+  const aiReply = await askGemini(text);
+  await sendWhatsAppMessage(from, aiReply);
+}
+
+// ---- Facebook Messenger ----
+async function handleMessenger(body) {
+  const entry = body.entry?.[0];
+  const messaging = entry?.messaging?.[0];
+  const senderId = messaging?.sender?.id;
+  const text = messaging?.message?.text;
+  if (!senderId || !text) return;
+
+  console.log(`Messenger message from ${senderId}: ${text}`);
+  const aiReply = await askGemini(text);
+  await sendMessengerMessage(senderId, aiReply);
+}
+
+async function sendMessengerMessage(recipientId, text) {
+  const url = `https://graph.facebook.com/v21.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      recipient: { id: recipientId },
+      message: { text },
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) console.error("Messenger send failed:", JSON.stringify(data));
+}
+
+// ---- Instagram ----
+async function handleInstagram(body) {
+  const entry = body.entry?.[0];
+  const messaging = entry?.messaging?.[0];
+  const senderId = messaging?.sender?.id;
+  const text = messaging?.message?.text;
+  if (!senderId || !text) return;
+
+  console.log(`Instagram message from ${senderId}: ${text}`);
+  const aiReply = await askGemini(text);
+  await sendInstagramMessage(senderId, aiReply);
+}
+
+async function sendInstagramMessage(recipientId, text) {
+  const url = `https://graph.facebook.com/v21.0/${IG_ACCOUNT_ID}/messages`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${IG_ACCESS_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      recipient: { id: recipientId },
+      message: { text },
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) console.error("Instagram send failed:", JSON.stringify(data));
+}
 
 // ====== 3. Ask Gemini for a reply ======
 async function askGemini(userMessage) {
