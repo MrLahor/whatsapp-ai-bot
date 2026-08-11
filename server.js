@@ -58,6 +58,7 @@ const WEBSITE_URLS = [
   // "https://nuvanta.africa/products",
   // "https://www.nuvanta.africa/contact",
   // "https://techverse.nuvanta.africa/",
+  // "https://techlab.nuvanta.africa/",
   // "https://techverse.nuvanta.africa/services/",
   // "https://techverse.nuvanta.africa/portfolio",
 ];
@@ -88,7 +89,6 @@ setInterval(refreshWebsiteContent, 6 * 60 * 60 * 1000);
 
 // ====== YOUR BUSINESS INFO GOES HERE ======
 // This is what the AI uses to answer questions. Edit this freely.
-const BUSINESS_CONTEXT = `
 const BUSINESS_CONTEXT = `
 You are "Nova" — the smart AI assistant for Nuvanta Africa (NVA Africa Ltd), a registered Nigerian technology company (RC No: 9666156).
 
