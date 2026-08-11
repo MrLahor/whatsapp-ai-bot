@@ -2,6 +2,7 @@
 // Flow: WhatsApp message -> this server -> Gemini API -> reply sent back via WhatsApp
 
 const express = require("express");
+const cheerio = require("cheerio");
 const app = express();
 app.use(express.json());
 
@@ -18,12 +19,72 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "PASTE_YOUR_PAGE_ACCE
 const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN || "PASTE_YOUR_INSTAGRAM_ACCESS_TOKEN_HERE";
 const IG_ACCOUNT_ID = process.env.IG_ACCOUNT_ID || "PASTE_YOUR_INSTAGRAM_ACCOUNT_ID_HERE";
 
+// ====== CONVERSATION MEMORY (per customer, auto-expires after 24h of silence) ======
+const conversations = new Map(); // key: sender ID, value: { history: [...], lastMessageTime }
+const SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+
+function getConversation(senderId) {
+  const now = Date.now();
+  const existing = conversations.get(senderId);
+  if (existing && now - existing.lastMessageTime < SESSION_TIMEOUT_MS) {
+    return existing;
+  }
+  const fresh = { history: [], lastMessageTime: now };
+  conversations.set(senderId, fresh);
+  return fresh;
+}
+
+// Periodic cleanup so memory doesn't grow forever with old, expired sessions
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, convo] of conversations) {
+    if (now - convo.lastMessageTime > SESSION_TIMEOUT_MS) conversations.delete(id);
+  }
+}, 60 * 60 * 1000);
+
 // ====== NUMBERS TO NEVER AUTO-RESPOND TO ======
 // Add any number here (in international format, no + or spaces, e.g. "2348012345678")
 // and the bot will completely ignore messages from it — no AI reply, no log of content.
 const BLOCKED_NUMBERS = [
   // "2348012345678", // example: boss's number
 ];
+
+// ====== WEBSITE PAGES TO PULL LIVE CONTENT FROM ======
+// Add any URLs you want the AI to stay up to date on. It re-fetches these
+// automatically every few hours, so editing your website updates the AI too.
+const WEBSITE_URLS = [
+  "https://nuvanta.africa",
+  // "https://nuvanta.africa/about",
+  // "https://nuvanta.africa/products",
+  // "https://www.nuvanta.africa/contact",
+  // "https://techverse.nuvanta.africa/",
+  // "https://techverse.nuvanta.africa/services/",
+  // "https://techverse.nuvanta.africa/portfolio",
+];
+
+let cachedWebsiteContent = ""; // filled in automatically, don't edit
+
+async function refreshWebsiteContent() {
+  const pages = [];
+  for (const url of WEBSITE_URLS) {
+    try {
+      const response = await fetch(url);
+      const html = await response.text();
+      const $ = cheerio.load(html);
+      $("script, style, nav, footer").remove(); // strip noise
+      const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 4000); // cap length
+      pages.push(`--- Content from ${url} ---\n${text}`);
+    } catch (err) {
+      console.error(`Failed to fetch ${url}:`, err.message);
+    }
+  }
+  cachedWebsiteContent = pages.join("\n\n");
+  console.log("Website content refreshed:", new Date().toISOString());
+}
+
+// Fetch once on startup, then refresh every 6 hours
+refreshWebsiteContent();
+setInterval(refreshWebsiteContent, 6 * 60 * 60 * 1000);
 
 // ====== YOUR BUSINESS INFO GOES HERE ======
 // This is what the AI uses to answer questions. Edit this freely.
@@ -77,12 +138,22 @@ HOW TO REPLY
 - Do NOT use Markdown (**bold**, dashes as bullets, # headers) — WhatsApp
   doesn't render it, it just shows literal symbols. Plain text only, or
   WhatsApp's own single-asterisk style if you truly need emphasis: *like this*.
-- Greet the customer by name if they share it.
+- You can see the full conversation history below. NEVER ask for the
+  customer's name, phone number, or any other detail they've already given
+  earlier in this same conversation — check what they already told you first.
 - For pricing questions, give the range and note the exact quote depends on
   their specific needs.
-- If someone wants to proceed, collect: name, phone number, service needed,
-  and timeline.
+- Once the customer has described what they need (the scope of work) AND
+  you've already given them a price range, STOP asking further clarifying
+  questions. Wrap up naturally: confirm you'll get their name and number if
+  you don't have them yet, then say a team member will follow up with a full
+  quote. Do not keep probing for more detail once you have enough to hand off.
 - Never promise a delivery date — that's confirmed by the team, not you.
+- If the customer references something from a previous conversation that
+  ISN'T shown in the history below (meaning too much time has passed and the
+  session reset), be honest: say you don't have that earlier conversation on
+  hand, and that a team member will follow up after checking. Don't pretend
+  to remember something you don't.
 - If you don't know something, say: "Let me get one of our team members to
   follow up with you shortly 🙏"
 - Match the customer's language — English or Pidgin.
@@ -139,7 +210,7 @@ async function handleWhatsApp(body) {
 
   console.log(`WhatsApp message from ${from}: ${text}`);
   await markAsReadAndTyping(message.id);
-  const aiReply = await askGemini(text);
+  const aiReply = await askGemini(from, text);
   await sendWhatsAppMessage(from, aiReply);
 }
 
@@ -152,7 +223,7 @@ async function handleMessenger(body) {
   if (!senderId || !text) return;
 
   console.log(`Messenger message from ${senderId}: ${text}`);
-  const aiReply = await askGemini(text);
+  const aiReply = await askGemini(senderId, text);
   await sendMessengerMessage(senderId, aiReply);
 }
 
@@ -179,7 +250,7 @@ async function handleInstagram(body) {
   if (!senderId || !text) return;
 
   console.log(`Instagram message from ${senderId}: ${text}`);
-  const aiReply = await askGemini(text);
+  const aiReply = await askGemini(senderId, text);
   await sendInstagramMessage(senderId, aiReply);
 }
 
@@ -200,19 +271,24 @@ async function sendInstagramMessage(recipientId, text) {
   if (!response.ok) console.error("Instagram send failed:", JSON.stringify(data));
 }
 
-// ====== 3. Ask Gemini for a reply ======
-async function askGemini(userMessage) {
+// ====== 3. Ask Gemini for a reply, using this customer's conversation history ======
+async function askGemini(senderId, userMessage) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
+
+  const convo = getConversation(senderId);
+  const fullContext = `${BUSINESS_CONTEXT}\n\nLIVE WEBSITE CONTENT (most current info — prefer this over anything above if they conflict):\n${cachedWebsiteContent}`;
+
+  const contents = [
+    ...convo.history,
+    { role: "user", parts: [{ text: userMessage }] },
+  ];
 
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      contents: [
-        {
-          parts: [{ text: `${BUSINESS_CONTEXT}\n\nCustomer message: "${userMessage}"\n\nYour reply:` }],
-        },
-      ],
+      system_instruction: { parts: [{ text: fullContext }] },
+      contents,
     }),
   });
 
@@ -224,7 +300,14 @@ async function askGemini(userMessage) {
   }
 
   const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  return reply || "Sorry, I'm having trouble responding right now — a team member will follow up shortly.";
+  const finalReply = reply || "Sorry, I'm having trouble responding right now — a team member will follow up shortly.";
+
+  // Save this exchange into memory for next time
+  convo.history.push({ role: "user", parts: [{ text: userMessage }] });
+  convo.history.push({ role: "model", parts: [{ text: finalReply }] });
+  convo.lastMessageTime = Date.now();
+
+  return finalReply;
 }
 
 // ====== 3.5 Show blue ticks + typing indicator while we prepare a reply ======
