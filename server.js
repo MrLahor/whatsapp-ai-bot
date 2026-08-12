@@ -233,7 +233,16 @@ CONVERSATION RULES
   24/7 😊"
 - Match the customer's language — English, Pidgin, or French.
 
+IF THIS IS WHATSAPP
+- You already know their phone number automatically — it's how they're
+  messaging you. NEVER ask for their phone number on WhatsApp, it's
+  redundant. Once you know their NAME and what they're interested in
+  (service), that's enough to save them as a lead — don't wait for
+  anything else.
+
 IF THIS CONVERSATION IS ON MESSENGER OR INSTAGRAM (not WhatsApp)
+- Unlike WhatsApp, you do NOT automatically know their phone number here —
+  you must actively ask for it.
 - If this is the very first message in the conversation (no earlier
   history shown below), answer their question first, then also naturally
   ask for their WhatsApp number so we can follow up and keep them updated
@@ -252,12 +261,17 @@ TECHNICAL NOTE — BOOKING TAG (invisible to the customer)
   casual pricing questions.
 
 TECHNICAL NOTE — SAVING LEAD INFO (invisible to the customer)
-- Whenever you learn a customer's name AND (phone number OR email) AND
-  what they're interested in, include this exact tag anywhere in your
-  reply (it will be removed before the customer sees it):
+- On WhatsApp: once you know their NAME and what they want (service), save
+  immediately — phone number is filled in automatically by the system, you
+  don't need to have it or ask for it.
+- On Messenger/Instagram: you need their NAME AND (phone number OR email)
+  AND what they're interested in before saving.
+- Include this exact tag anywhere in your reply (it will be removed before
+  the customer sees it):
   [SAVE_LEAD:{"name":"their name","phone":"their number or empty string","email":"their email or empty string","service":"what they want","notes":"anything else useful, including any preferred day/time they mentioned for a discovery session"}]
 - Only include this once you actually have real info to save — never
-  invent placeholder values.
+  invent placeholder values. On WhatsApp, leave "phone" as an empty string
+  since it's filled in automatically.
 `;
 
 // ====== Save a lead to the custom CRM (Supabase) ======
@@ -288,6 +302,33 @@ async function saveLead(platform, senderId, leadData) {
   }
 }
 
+// ====== Summarize a full conversation for the owner alert (not just the last message) ======
+async function summarizeConversation(senderId) {
+  const convo = getConversation(senderId);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
+
+  const summaryInstruction =
+    "Summarize this customer conversation in 3-5 short sentences for a busy business owner. " +
+    "Include: what they need/want, any key requirements or details they mentioned, budget or " +
+    "timeline if discussed, and their name/contact info if they gave it. Be specific, not generic.";
+
+  const contents = [...convo.history, { role: "user", parts: [{ text: summaryInstruction }] }];
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents }),
+    });
+    const data = await response.json();
+    const summary = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    return summary || "Could not generate summary — check the leads dashboard or Render logs for the full conversation.";
+  } catch (err) {
+    console.error("Failed to summarize conversation:", err);
+    return "Could not generate summary — check the leads dashboard or Render logs for the full conversation.";
+  }
+}
+
 // ====== Process an AI reply: strip special tags, act on them, return clean text ======
 async function processAIReply(aiReply, platform, senderId, userMessage) {
   let cleanReply = aiReply;
@@ -297,6 +338,11 @@ async function processAIReply(aiReply, platform, senderId, userMessage) {
   if (saveLeadMatch) {
     try {
       const leadData = JSON.parse(saveLeadMatch[1]);
+      // On WhatsApp, the sender ID IS their phone number — always use it,
+      // never rely on the AI having asked for it separately.
+      if (platform === "WhatsApp" && !leadData.phone) {
+        leadData.phone = senderId;
+      }
       await saveLead(platform, senderId, leadData);
     } catch (err) {
       console.error("Failed to parse SAVE_LEAD tag:", err);
@@ -313,8 +359,9 @@ async function processAIReply(aiReply, platform, senderId, userMessage) {
       cleanReply = `${cleanReply}\n\n${formLink}`;
     }
 
+    const summary = await summarizeConversation(senderId);
     await notifyOwner(
-      `Platform: ${platform}\nCustomer: ${senderId}\nTheir last message: "${userMessage}"\nAI's reply: "${cleanReply}"\n\nThey're ready to move forward — check the leads dashboard for full details.`
+      `Platform: ${platform}\nCustomer: ${senderId}\n\n${summary}\n\nThey're ready to move forward — check the leads dashboard for full details.`
     );
   }
 
