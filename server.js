@@ -3,7 +3,9 @@
 
 const express = require("express");
 const cheerio = require("cheerio");
+const cors = require("cors");
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 // ====== FILL THESE IN (.env or directly here for quick testing) ======
@@ -11,6 +13,23 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "my_test_verify_token_123"; // 
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || "PASTE_YOUR_META_ACCESS_TOKEN_HERE";
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "PASTE_YOUR_PHONE_NUMBER_ID_HERE";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "PASTE_YOUR_GEMINI_API_KEY_HERE";
+
+// ====== BROADCAST PANEL ======
+// A password you make up, used to access the /broadcast-panel page
+const BROADCAST_SECRET = process.env.BROADCAST_SECRET || "PASTE_A_PASSWORD_HERE";
+
+// ====== WHATSAPP FLOW (in-chat form) ======
+// Get this ID after creating and publishing your Flow in WhatsApp Manager
+const QUOTE_FLOW_ID = process.env.QUOTE_FLOW_ID || "PASTE_YOUR_FLOW_ID_HERE";
+
+// ====== CUSTOM CRM (Supabase) ======
+const SUPABASE_URL = process.env.SUPABASE_URL || "PASTE_YOUR_SUPABASE_PROJECT_URL_HERE";
+const SUPABASE_KEY = process.env.SUPABASE_KEY || "PASTE_YOUR_SUPABASE_ANON_KEY_HERE";
+const CRM_SECRET = process.env.CRM_SECRET || "PASTE_A_PASSWORD_HERE"; // for viewing the leads dashboard
+
+// ====== ALERT YOU WHEN A HUMAN NEEDS TO STEP IN ======
+const OWNER_WHATSAPP_NUMBER = process.env.OWNER_WHATSAPP_NUMBER || "2348143594483";
+const BASE_URL = process.env.BASE_URL || "https://whatsapp-ai-bot-b134.onrender.com";
 
 // ====== FACEBOOK MESSENGER ======
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "PASTE_YOUR_PAGE_ACCESS_TOKEN_HERE";
@@ -54,13 +73,8 @@ const BLOCKED_NUMBERS = [
 // automatically every few hours, so editing your website updates the AI too.
 const WEBSITE_URLS = [
   "https://nuvanta.africa",
-  // "https://nuvanta.africa/about",
-  // "https://nuvanta.africa/products",
-  // "https://www.nuvanta.africa/contact",
-  // "https://techverse.nuvanta.africa/",
-  // "https://techlab.nuvanta.africa/",
-  // "https://techverse.nuvanta.africa/services/",
-  // "https://techverse.nuvanta.africa/portfolio",
+  // "https://nuvanta.africa/services",
+  // "https://nuvanta.africa/pricing",
 ];
 
 let cachedWebsiteContent = ""; // filled in automatically, don't edit
@@ -96,103 +110,405 @@ Your personality:
 - You are warm, professional, and genuinely helpful — like a knowledgeable friend who works at Nuvanta Africa
 - You think like a problem solver. Before suggesting a service, ask questions to understand what the customer actually needs
 - You are conversational and dynamic — not robotic or scripted
-- You respond in the same language the customer uses — English or Pidgin
+- You respond in the same language the customer uses — English, Pidgin, or French
 - You keep messages short and punchy — no long paragraphs. Use line breaks and emojis naturally
 - You never give a generic answer when a specific one is possible
 
 Your name: Nova ✨
-When greeting, introduce yourself: "Hi! I'm Nova, your Nuvanta Africa assistant 👋"
+When greeting on the very first message of a conversation, introduce yourself: "Hi! I'm Nova, your Nuvanta Africa assistant 👋"
 
-Company Info:
+COMPANY INFO
 - Company: Nuvanta Africa (NVA Africa Ltd) | RC No: 9666156
-- Website: nuvanta.africa
-- WhatsApp/Phone: 08143594483
-- Email: nuvantaafrica@gmail.com
-- Location: Ibadan, Oyo State, Nigeria
-- Service: Nationwide (Nigeria) and across Africa
-- Hours: Mon–Sat, 9am–6pm WAT | Nova is available 24/7
+- Website: nuvanta.africa | WhatsApp/Phone: 08143594483 | Email: nuvantaafrica@gmail.com
+- Location: Ibadan, Oyo State, Nigeria — service nationwide (Nigeria) and across Africa
+- Hours: Mon-Sat, 9am-6pm WAT | Nova is available 24/7
 
-What Nuvanta Africa Does:
+WHAT NUVANTA AFRICA DOES
 
-🌐 TECH SERVICES (Websites, Apps, AI, Automation)
+TECH SERVICES (Websites, Apps, AI, Automation)
 - Professional websites, e-commerce stores, web applications
 - Mobile apps (iOS & Android)
-- AI chatbots for businesses
-- AI automation and workflow systems
+- AI chatbots for businesses, AI automation and workflow systems
 - Digital marketing and paid ad campaigns
 - Shopify stores, Amazon seller setup
 
-📄 PROFESSIONAL SERVICES
+PROFESSIONAL SERVICES
 - CAC business registration (business name & limited liability)
 - NAFDAC registration
-- Business plan writing
-- Proposal, report, and CV writing
+- Business plan writing, proposal/report/CV writing
 
-🎓 TECHLAB TRAINING (Ibadan + Online)
+TECHLAB TRAINING (Ibadan + Online)
 - Courses: Digital Marketing, AI Chatbot Development, AI Automation, Low-Code Web & App Development
-- Summer Bootcamp (4–6 weeks) for students and professionals
+- Summer Bootcamp (4-6 weeks) for students and professionals
 - School curriculum partnerships for secondary schools
 
-🚀 SAAS PRODUCTS
-- LeadStack: WhatsApp lead capture tool — leadstack.nuvanta.africa
-- Kavro: POS and business management — kavro.nuvanta.africa
-- FarmGuard: AI farming assistant — farmguard.app
-- SketchGen: AI technical drawing tool — sketchgen.nuvanta.africa
+SAAS PRODUCTS
+- LeadStack (WhatsApp lead capture): leadstack.nuvanta.africa
+- Kavro (POS & business management): kavro.nuvanta.africa
+- FarmGuard (AI farming assistant): farmguard.app
+- SketchGen (AI technical drawing): sketchgen.nuvanta.africa
 
-Payment:
+PAYMENT
 - FCMB | NVA AFRICA LTD | Account: 2008108183
 - 50% deposit before work begins. Balance on delivery.
 
-HOW YOU HANDLE CONVERSATIONS:
+HOW YOU HANDLE CONVERSATIONS
 
 Step 1 — Understand first, answer second.
-When someone asks about a service, don't immediately quote prices.
-Ask 1–2 smart questions to understand their situation first.
-Example: If someone says "I need a website" — ask:
-"That's great! To point you in the right direction — is this for a business, personal brand, or e-commerce store? And do you already have a domain name?"
+When someone asks about a service, don't immediately quote prices. Ask 1-2
+smart questions to understand their situation first.
+Example: "I need a website" → "That's great! To point you in the right
+direction — is this for a business, personal brand, or e-commerce store?
+And do you already have a domain name?"
 
 Step 2 — Once you understand their need, give a tailored response.
-Explain how Nuvanta Africa can solve their specific problem.
-Only mention pricing as a range — say exact cost depends on their requirements.
+Explain how Nuvanta Africa solves their specific problem. Only mention
+pricing as a range — say the exact cost depends on their requirements.
+NEVER give a final, specific price yourself under any circumstance — a
+range only, always framed as needing team confirmation for the exact figure.
 
 Step 3 — Offer to send a project brief form.
-For tech services, training, or professional services, say:
-"To give you an accurate quote and timeline, I'll send you a short project brief form to fill. It takes less than 3 minutes. Should I send it across? 📋"
+For tech services, training, or professional services, once they're
+engaged and interested, say something like: "To give you an accurate quote
+and timeline, I'll send you a short project brief form to fill — takes
+less than 3 minutes. Should I send it across? 📋" If they agree, include
+[BOOK_CALL] at the very start of your NEXT reply (see the technical note
+on this tag below).
 
-Step 4 — Offer a booking session before closing.
-Before giving a final quote or sending a contract, always say:
-"The best next step would be a quick discovery session with one of our team members — it's free and takes about 20–30 minutes. They'll go through your needs in detail and give you an exact quote.
+Step 4 — Offer a discovery session before closing.
+Before implying a final quote or contract, say something like: "The best
+next step would be a quick discovery session with one of our team members
+— it's free and takes about 20-30 minutes. They'll go through your needs
+in detail and give you an exact quote. What day and time works best for
+you?" Note: you can collect their preferred day/time as information to
+pass along, but you cannot actually confirm a slot or generate a real
+booking link yourself — a team member finalizes that. Don't claim to send
+a "confirmation with a session link" — instead say the team will confirm
+the exact time with them shortly.
 
-What day and time works best for you? You can pick any slot:
-📅 Monday to Saturday | 9am – 6pm WAT
+Step 5 — If they want a contract or to proceed directly.
+Say: "Perfect! I'll get our team to prepare a project agreement and send
+it across, including the timeline and payment structure. Can I confirm
+your full name and email address for the document?" Once you have this,
+use the SAVE_LEAD tag (see below).
 
-Just drop your preferred day and time and we'll send you a confirmation with the session link 🙏"
+Step 6 — If Nova cannot answer something.
+Say: "That's a great question — let me connect you with one of our
+technical team members who can give you a precise answer on this. They'll
+follow up with you shortly 🙏 In the meantime, is there anything else I
+can help you with?"
 
-Step 5 — If they want a contract or to proceed directly:
-Say: "Perfect! I'll get our team to prepare a project agreement and send it across to you. We'll also include the timeline and payment structure. Can I confirm your full name and email address for the document?"
+CONVERSATION RULES
+- Write like a real person texting on WhatsApp, not like an AI. Answer
+  directly and naturally.
+- Always greet warmly and introduce yourself as Nova on the first message
+  of a conversation only — don't reintroduce yourself every message.
+- Keep it SHORT — 1-5 sentences per message. If listing a few options, put
+  each on its own line, but don't over-explain.
+- Do NOT use Markdown (**bold**, dashes as bullets, # headers) — WhatsApp
+  doesn't render it, it just shows literal symbols. Plain text only, or
+  WhatsApp's own single-asterisk style if you truly need emphasis: *like this*.
+- Never overwhelm with too much information at once — pace the conversation.
+- You can see the full conversation history below. NEVER ask for the
+  customer's name, phone number, or any other detail they've already given
+  earlier in this same conversation — check what they already told you first.
+- After every key response, ask a follow-up question or offer a next step.
+- If the customer references something from a previous conversation that
+  ISN'T shown in the history below (meaning too much time has passed and
+  the session reset), be honest: say you don't have that earlier
+  conversation on hand, and that a team member will follow up after
+  checking. Don't pretend to remember something you don't.
+- If the customer seems ready to proceed, pivot toward Step 3 or Step 4.
+- If the customer is browsing or just curious, be helpful and educational
+  without being pushy.
+- For TechLab enquiries, ask: "Are you looking to enroll yourself, your
+  child, or are you a school/organisation looking for a training partnership?"
+- For CAC/Professional Services, ask: "Is this for a new business
+  registration or an existing business?"
+- For SaaS products, direct them to the relevant link and offer to walk
+  them through it.
+- Never promise a specific price, delivery date, or outcome without saying
+  "our team will confirm this."
+- Always close with warmth: "Feel free to ask me anything else — I'm here
+  24/7 😊"
+- Match the customer's language — English, Pidgin, or French.
 
-Step 6 — If Nova cannot answer something:
-Say: "That's a great question — let me connect you with one of our technical team members who can give you a precise answer on this. They'll follow up with you shortly 🙏
-In the meantime, is there anything else I can help you with?"
+IF THIS CONVERSATION IS ON MESSENGER OR INSTAGRAM (not WhatsApp)
+- If this is the very first message in the conversation (no earlier
+  history shown below), answer their question first, then also naturally
+  ask for their WhatsApp number so we can follow up and keep them updated
+  there — this helps capture them as a lead even if they don't need the
+  tech team right away.
+- Once they show real interest, ask for their WhatsApp number specifically
+  so the team can follow up there. If they don't want to share it, ask for
+  their email instead.
 
-CONVERSATION RULES:
-- Write like a real person texting on WhatsApp, not like an AI. Answer directly and naturally.
-- Always greet warmly and introduce yourself as Nova on first message
-- Keep it SHORT — 1-5 sentences per message. If listing a few options, put each on its own line, but don't over-explain.
-- Do NOT use Markdown (**bold**, dashes as bullets, # headers) — WhatsApp doesn't render it, it just shows literal symbols. Plain text only, or WhatsApp's own single-asterisk style if you truly need emphasis: *like this*.
-- Never overwhelm with too much information at once — pace the conversation
-- You can see the full conversation history below. NEVER ask for the customer's name, phone number, or any other detail they've already given earlier in this same conversation — check what they already told you first.
-- After every key response, ask a follow-up question or offer a next step
-- If the customer references something from a previous conversation that ISN'T shown in the history below (meaning too much time has passed and the session reset), be honest: say you don't have that earlier conversation on hand, and that a team member will follow up after checking. Don't pretend to remember something you don't.
-- If customer seems ready to proceed, immediately pivot to booking a session
-- If customer is browsing or just curious, be helpful and educational without being pushy
-- For TechLab enquiries, ask: "Are you looking to enroll yourself, your child or are you a school/organisation looking for a training partnership?"
-- For CAC/Professional Services, ask: "Is this for a new business registration or an existing business?"
-- For SaaS products, direct them to the relevant link and offer to walk them through it
-- Never promise a specific price, delivery date, or outcome without saying "our team will confirm this"
-- Always close with warmth: "Feel free to ask me anything else — I'm here 24/7 😊"
-- Match the customer's language — English or Pidgin or French.
+TECHNICAL NOTE — BOOKING TAG (invisible to the customer)
+- When Step 3 applies (sending the project brief form), include the exact
+  tag [BOOK_CALL] at the very start of your reply, before your message. On
+  WhatsApp this opens an in-chat form; on other platforms a link is added
+  automatically after your message — don't write out a fake link yourself.
+- Only use this when they're genuinely ready to move forward, not for
+  casual pricing questions.
+
+TECHNICAL NOTE — SAVING LEAD INFO (invisible to the customer)
+- Whenever you learn a customer's name AND (phone number OR email) AND
+  what they're interested in, include this exact tag anywhere in your
+  reply (it will be removed before the customer sees it):
+  [SAVE_LEAD:{"name":"their name","phone":"their number or empty string","email":"their email or empty string","service":"what they want","notes":"anything else useful, including any preferred day/time they mentioned for a discovery session"}]
+- Only include this once you actually have real info to save — never
+  invent placeholder values.
 `;
+
+// ====== Save a lead to the custom CRM (Supabase) ======
+async function saveLead(platform, senderId, leadData) {
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/leads`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify({
+        platform,
+        sender_id: senderId,
+        name: leadData.name || null,
+        phone: leadData.phone || null,
+        email: leadData.email || null,
+        service_interest: leadData.service || null,
+        notes: leadData.notes || null,
+      }),
+    });
+    if (!response.ok) console.error("Failed to save lead:", await response.text());
+    else console.log(`Lead saved for ${senderId}`);
+  } catch (err) {
+    console.error("Error saving lead:", err);
+  }
+}
+
+// ====== Process an AI reply: strip special tags, act on them, return clean text ======
+async function processAIReply(aiReply, platform, senderId, userMessage) {
+  let cleanReply = aiReply;
+  let shouldBookCall = false;
+
+  const saveLeadMatch = cleanReply.match(/\[SAVE_LEAD:(\{.*?\})\]/);
+  if (saveLeadMatch) {
+    try {
+      const leadData = JSON.parse(saveLeadMatch[1]);
+      await saveLead(platform, senderId, leadData);
+    } catch (err) {
+      console.error("Failed to parse SAVE_LEAD tag:", err);
+    }
+    cleanReply = cleanReply.replace(saveLeadMatch[0], "").trim();
+  }
+
+  if (cleanReply.startsWith("[BOOK_CALL]")) {
+    shouldBookCall = true;
+    cleanReply = cleanReply.replace("[BOOK_CALL]", "").trim();
+
+    if (platform !== "WhatsApp") {
+      const formLink = `${BASE_URL}/book-session?platform=${platform}&sender=${senderId}`;
+      cleanReply = `${cleanReply}\n\n${formLink}`;
+    }
+
+    await notifyOwner(
+      `Platform: ${platform}\nCustomer: ${senderId}\nTheir last message: "${userMessage}"\nAI's reply: "${cleanReply}"\n\nThey're ready to move forward — check the leads dashboard for full details.`
+    );
+  }
+
+  return { cleanReply, shouldBookCall };
+}
+
+// ====== Booking form — Messenger/Instagram equivalent of WhatsApp's in-chat Flow ======
+app.get("/book-session", (req, res) => {
+  const { platform, sender } = req.query;
+  res.send(`
+    <html><body style="font-family: sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px;">
+      <h2>Book a Session with Our Tech Team</h2>
+      <p>Fill this quick form and we'll follow up with a full quote.</p>
+      <form method="POST" action="/book-session">
+        <input type="hidden" name="platform" value="${platform || ""}">
+        <input type="hidden" name="sender" value="${sender || ""}">
+        <label>Name<br><input type="text" name="name" style="width:100%; padding:8px;" required></label><br><br>
+        <label>WhatsApp Number<br><input type="text" name="phone" style="width:100%; padding:8px;" placeholder="e.g. 2348012345678"></label><br><br>
+        <label>Email (if no WhatsApp number)<br><input type="email" name="email" style="width:100%; padding:8px;"></label><br><br>
+        <label>What do you need?<br><input type="text" name="service" style="width:100%; padding:8px;" required></label><br><br>
+        <label>Anything else to add?<br><textarea name="notes" rows="4" style="width:100%; padding:8px;"></textarea></label><br><br>
+        <button type="submit" style="padding:10px 20px;">Submit</button>
+      </form>
+    </body></html>
+  `);
+});
+
+app.post("/book-session", express.urlencoded({ extended: true }), async (req, res) => {
+  const { platform, sender, name, phone, email, service, notes } = req.body;
+
+  await saveLead(platform || "Web Form", sender || "unknown", { name, phone, email, service, notes });
+  await notifyOwner(
+    `Booking form submitted (${platform || "Web"})\nName: ${name}\nPhone: ${phone || "-"}\nEmail: ${email || "-"}\nService: ${service}\nNotes: ${notes || "-"}`
+  );
+
+  // Confirm to the customer in their original chat, if we know the platform/sender
+  const confirmMsg = "Thanks! We've got your details — our team will follow up shortly 🙏";
+  if (platform === "Messenger") await sendMessengerMessage(sender, confirmMsg);
+  else if (platform === "Instagram") await sendInstagramMessage(sender, confirmMsg);
+
+  res.send(`<body style="font-family: sans-serif; text-align:center; margin-top:60px;"><h2>Thanks, ${name}! 🎉</h2><p>Our team will follow up with you shortly.</p></body>`);
+});
+
+// ====== Leads dashboard — simple password-protected page to view your CRM ======
+app.get("/leads", async (req, res) => {
+  if (req.query.secret !== CRM_SECRET) {
+    return res.send('<form>Password: <input type="password" name="secret"><button>View</button></form>');
+  }
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/leads?order=created_at.desc`, {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+    });
+    const leads = await response.json();
+    const rows = leads
+      .map(
+        (l) =>
+          `<tr><td>${l.created_at?.slice(0, 16)}</td><td>${l.platform}</td><td>${l.name || ""}</td><td>${l.phone || ""}</td><td>${l.email || ""}</td><td>${l.service_interest || ""}</td><td>${l.notes || ""}</td></tr>`
+      )
+      .join("");
+    res.send(`
+      <html><body style="font-family: sans-serif;">
+        <h2>Leads (${leads.length})</h2>
+        <table border="1" cellpadding="8" style="border-collapse: collapse;">
+          <tr><th>Date</th><th>Platform</th><th>Name</th><th>Phone</th><th>Email</th><th>Service</th><th>Notes</th></tr>
+          ${rows}
+        </table>
+      </body></html>
+    `);
+  } catch (err) {
+    res.send("Error loading leads: " + err.message);
+  }
+});
+
+// ====== JSON API — call this from your Lovable dashboard to send a broadcast ======
+app.post("/api/broadcast", async (req, res) => {
+  const { secret, template, numbers } = req.body;
+
+  if (secret !== BROADCAST_SECRET) {
+    return res.status(401).json({ error: "Wrong password" });
+  }
+  if (!template || !Array.isArray(numbers) || numbers.length === 0) {
+    return res.status(400).json({ error: "Missing template or numbers list" });
+  }
+
+  const results = [];
+  for (const number of numbers) {
+    const success = await sendWhatsAppTemplate(number.trim(), template);
+    results.push({ number: number.trim(), success });
+  }
+
+  res.json({ sent: results.filter((r) => r.success).length, failed: results.filter((r) => !r.success).length, results });
+});
+
+// ====== Broadcast panel — a simple password-protected page to send to many numbers ======
+app.get("/broadcast-panel", (req, res) => {
+  res.send(`
+    <html><body style="font-family: sans-serif; max-width: 500px; margin: 40px auto;">
+      <h2>Send Broadcast</h2>
+      <form method="POST" action="/broadcast">
+        <label>Password<br><input type="password" name="secret" style="width:100%; padding:8px;" required></label><br><br>
+        <label>Template name (must be Meta-approved)<br><input type="text" name="template" style="width:100%; padding:8px;" required></label><br><br>
+        <label>Phone numbers (one per line, international format, no + or spaces)<br>
+          <textarea name="numbers" rows="8" style="width:100%; padding:8px;" required placeholder="2348143594483&#10;2348140458307"></textarea>
+        </label><br><br>
+        <button type="submit" style="padding:10px 20px;">Send Broadcast</button>
+      </form>
+    </body></html>
+  `);
+});
+
+app.post("/broadcast", express.urlencoded({ extended: true }), async (req, res) => {
+  const { secret, template, numbers } = req.body;
+
+  if (secret !== BROADCAST_SECRET) {
+    return res.send("Wrong password.");
+  }
+
+  const numberList = numbers.split("\n").map((n) => n.trim()).filter(Boolean);
+  const results = [];
+
+  for (const number of numberList) {
+    const success = await sendWhatsAppTemplate(number, template);
+    results.push(`${number}: ${success ? "sent" : "FAILED"}`);
+  }
+
+  res.send(`<pre>${results.join("\n")}</pre><br><a href="/broadcast-panel">Send another</a>`);
+});
+
+async function sendWhatsAppTemplate(to, templateName, bodyParams = []) {
+  const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
+  const template = { name: templateName, language: { code: "en_US" } };
+  if (bodyParams.length) {
+    template.components = [{ type: "body", parameters: bodyParams.map((p) => ({ type: "text", text: p })) }];
+  }
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ messaging_product: "whatsapp", to, type: "template", template }),
+  });
+  const data = await response.json();
+  if (!response.ok) console.error(`Template send to ${to} failed:`, JSON.stringify(data));
+  return response.ok;
+}
+
+// ====== Alert the owner via WhatsApp when a human needs to step in ======
+// Tries a normal message first (instant, works if you've messaged the bot
+// recently); falls back to an approved template if that fails (guarantees
+// delivery even outside the 24h window). Requires a template named
+// "lead_alert" with one body variable, e.g.: "New lead alert: {{1}}"
+async function notifyOwner(summary) {
+  const sent = await sendWhatsAppMessage(OWNER_WHATSAPP_NUMBER, `🔔 Human needed:\n\n${summary}`);
+  if (!sent) {
+    console.log("Instant alert failed, falling back to template...");
+    await sendWhatsAppTemplate(OWNER_WHATSAPP_NUMBER, "lead_alert", [summary.slice(0, 1000)]);
+  }
+}
+
+// ====== Send the interactive quote-request Flow (form) to a customer ======
+async function sendQuoteFlow(to) {
+  const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "flow",
+        header: { type: "text", text: "Get a Quote" },
+        body: { text: "Fill this quick form and our team will get back to you with a full quote." },
+        footer: { text: "Nuvanta Africa" },
+        action: {
+          name: "flow",
+          parameters: {
+            flow_message_version: "3",
+            flow_id: QUOTE_FLOW_ID,
+            flow_cta: "Fill Form",
+            flow_action: "navigate",
+            flow_action_payload: { screen: "QUOTE_FORM" },
+          },
+        },
+      },
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) console.error("Failed to send Flow:", JSON.stringify(data));
+}
 
 // ====== 1. Webhook verification (Meta calls this once when you set up the webhook) ======
 app.get("/webhook", (req, res) => {
@@ -227,6 +543,22 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+// ====== Download an image/audio file WhatsApp sent us ======
+async function downloadWhatsAppMedia(mediaId) {
+  const metaRes = await fetch(`https://graph.facebook.com/v21.0/${mediaId}`, {
+    headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+  });
+  const metaData = await metaRes.json();
+
+  const fileRes = await fetch(metaData.url, {
+    headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+  });
+  const arrayBuffer = await fileRes.arrayBuffer();
+  const base64Data = Buffer.from(arrayBuffer).toString("base64");
+
+  return { base64Data, mimeType: metaData.mime_type };
+}
+
 // ---- WhatsApp ----
 async function handleWhatsApp(body) {
   const entry = body.entry?.[0];
@@ -235,18 +567,48 @@ async function handleWhatsApp(body) {
   if (!message) return;
 
   const from = message.from;
-  const text = message.text?.body;
-  if (!text) return;
-
   if (BLOCKED_NUMBERS.includes(from)) {
     console.log(`Ignored WhatsApp message from blocked number ${from}`);
     return;
   }
 
+  let text = message.text?.body;
+  let media = null;
+
+  // Capture a submitted Flow (form) response
+  if (message.type === "interactive" && message.interactive?.type === "nfm_reply") {
+    const formData = JSON.parse(message.interactive.nfm_reply.response_json);
+    console.log(`Form submitted by ${from}:`, JSON.stringify(formData));
+    await saveLead("WhatsApp", from, {
+      name: formData.name,
+      phone: formData.phone || from,
+      service: formData.service,
+      notes: formData.details,
+    });
+    await notifyOwner(
+      `Form submitted on WhatsApp\nName: ${formData.name}\nPhone: ${formData.phone || from}\nService: ${formData.service}\nDetails: ${formData.details || "-"}`
+    );
+    await sendWhatsAppMessage(from, "Thanks! We've got your details — our team will follow up shortly with your quote 🙏");
+    return;
+  }
+
+  if (message.type === "image") {
+    media = await downloadWhatsAppMedia(message.image.id);
+    text = message.image.caption || "[Customer sent an image — look at it and respond helpfully.]";
+  } else if (message.type === "audio") {
+    media = await downloadWhatsAppMedia(message.audio.id);
+    text = "[Customer sent a voice note — listen to it and respond helpfully.]";
+  }
+
+  if (!text && !media) return; // unsupported message type (video, sticker, etc.)
+
   console.log(`WhatsApp message from ${from}: ${text}`);
   await markAsReadAndTyping(message.id);
-  const aiReply = await askGemini(from, text);
-  await sendWhatsAppMessage(from, aiReply);
+  const aiReply = await askGemini(from, text, "WhatsApp", media);
+  const { cleanReply, shouldBookCall } = await processAIReply(aiReply, "WhatsApp", from, text);
+
+  await sendWhatsAppMessage(from, cleanReply);
+  if (shouldBookCall) await sendQuoteFlow(from);
 }
 
 // ---- Facebook Messenger ----
@@ -258,8 +620,9 @@ async function handleMessenger(body) {
   if (!senderId || !text) return;
 
   console.log(`Messenger message from ${senderId}: ${text}`);
-  const aiReply = await askGemini(senderId, text);
-  await sendMessengerMessage(senderId, aiReply);
+  const aiReply = await askGemini(senderId, text, "Messenger");
+  const { cleanReply } = await processAIReply(aiReply, "Messenger", senderId, text);
+  await sendMessengerMessage(senderId, cleanReply);
 }
 
 async function sendMessengerMessage(recipientId, text) {
@@ -285,8 +648,9 @@ async function handleInstagram(body) {
   if (!senderId || !text) return;
 
   console.log(`Instagram message from ${senderId}: ${text}`);
-  const aiReply = await askGemini(senderId, text);
-  await sendInstagramMessage(senderId, aiReply);
+  const aiReply = await askGemini(senderId, text, "Instagram");
+  const { cleanReply } = await processAIReply(aiReply, "Instagram", senderId, text);
+  await sendInstagramMessage(senderId, cleanReply);
 }
 
 async function sendInstagramMessage(recipientId, text) {
@@ -307,15 +671,20 @@ async function sendInstagramMessage(recipientId, text) {
 }
 
 // ====== 3. Ask Gemini for a reply, using this customer's conversation history ======
-async function askGemini(senderId, userMessage) {
+async function askGemini(senderId, userMessage, platform, media = null) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
 
   const convo = getConversation(senderId);
-  const fullContext = `${BUSINESS_CONTEXT}\n\nLIVE WEBSITE CONTENT (most current info — prefer this over anything above if they conflict):\n${cachedWebsiteContent}`;
+  const fullContext = `${BUSINESS_CONTEXT}\n\nCURRENT PLATFORM: ${platform}\n\nLIVE WEBSITE CONTENT (most current info — prefer this over anything above if they conflict):\n${cachedWebsiteContent}`;
+
+  const currentParts = [{ text: userMessage }];
+  if (media) {
+    currentParts.push({ inlineData: { mimeType: media.mimeType, data: media.base64Data } });
+  }
 
   const contents = [
     ...convo.history,
-    { role: "user", parts: [{ text: userMessage }] },
+    { role: "user", parts: currentParts },
   ];
 
   const response = await fetch(url, {
@@ -388,9 +757,10 @@ async function sendWhatsAppMessage(to, text) {
   const data = await response.json();
   if (!response.ok) {
     console.error("WhatsApp send failed:", JSON.stringify(data));
-  } else {
-    console.log(`Reply sent to ${to}`);
+    return false;
   }
+  console.log(`Reply sent to ${to}`);
+  return true;
 }
 
 const PORT = process.env.PORT || 3000;
