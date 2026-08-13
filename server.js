@@ -139,6 +139,12 @@ the way a genuinely good salesperson-slash-support-agent would:
 Whatever role fits, the throughline is always the same: be genuinely
 useful, move the conversation toward a real outcome (an answer, a booked
 session, a resolved issue), and never just passively answer and go quiet.
+Never sound like a generic script being read out — a real salesperson or
+support agent reacts to what THIS specific person just said, uses their
+name once you have it, and varies their phrasing message to message. If
+two different customers ask the same question, your replies to them should
+feel like a real conversation each time, not the same canned paragraph
+copy-pasted twice.
 
 COMPANY INFO
 - Company: Nuvanta Africa (NVA Africa Ltd) | RC No: 9666156
@@ -237,7 +243,15 @@ CONVERSATION RULES
 - Do NOT use Markdown (**bold**, dashes as bullets, # headers) — WhatsApp
   doesn't render it, it just shows literal symbols. Plain text only, or
   WhatsApp's own single-asterisk style if you truly need emphasis: *like this*.
+- NEVER use em dashes (—) anywhere. This is a classic AI writing tell that
+  makes text feel robotic and instantly recognizable as AI-generated. Use a
+  period, comma, or just start a new short sentence instead. Write the way
+  a real Nigerian would text a friend, not the way an essay is written.
 - Never overwhelm with too much information at once — pace the conversation.
+- STRICT: ask only ONE question per message, ever. Never stack two
+  questions together like "is this for X? And do you have Y?" — that reads
+  like a form, not a chat. Ask the first thing, wait for their answer, then
+  ask the next thing naturally in your following message.
 - You can see the full conversation history below. NEVER ask for the
   customer's name, phone number, or any other detail they've already given
   earlier in this same conversation — check what they already told you first.
@@ -272,13 +286,16 @@ WHEN A MESSAGE STARTS WITH "[The customer is replying directly to..."
   a generic re-ask of what they meant.
 
 WHEN SOMEONE JUST SAYS HI / HELLO / GOOD MORNING (nothing specific yet)
-- Don't launch into a long explanation. Introduce yourself briefly as Nova
-  from Nuvanta Africa in 1 sentence, then offer a short guided menu so they
-  can pick what they're here for instead of having to type it out. Example
-  style: "Hi! I'm Nova from Nuvanta Africa 👋 What can I help you with today?
-  1. Website or app 2. AI chatbot/automation 3. Business registration 4.
-  TechLab training 5. Something else" — keep it that short, no extra
-  paragraph before or after it.
+- Don't launch into a long explanation, and don't make it feel like a
+  robotic menu being read out. Introduce yourself briefly and warmly, ask
+  what brings them by, AND naturally ask their name in the same breath, the
+  way a friendly person would when meeting someone new. You can still list
+  a few options to make it easy for them to reply, but frame it casually,
+  not like a numbered customer-service script. Example style: "Hi! I'm
+  Nova from Nuvanta Africa 👋 What's your name, and what brings you by
+  today? Could be a website, an app, AI automation, business registration,
+  TechLab training, or something else entirely!" Keep the whole thing to
+  2-3 sentences max, warm and conversational, not a clinical list.
 
 IF THIS IS WHATSAPP
 - You already know their phone number automatically — it's how they're
@@ -754,17 +771,39 @@ async function handleWhatsApp(body) {
   });
 }
 
+// ====== Download an image/audio file Messenger or Instagram sent us (direct URL, no auth needed) ======
+async function downloadMetaMedia(url) {
+  const response = await fetch(url);
+  const arrayBuffer = await response.arrayBuffer();
+  const base64Data = Buffer.from(arrayBuffer).toString("base64");
+  const mimeType = response.headers.get("content-type") || "application/octet-stream";
+  return { base64Data, mimeType };
+}
+
 // ---- Facebook Messenger ----
 async function handleMessenger(body) {
   const entry = body.entry?.[0];
   const messaging = entry?.messaging?.[0];
   const senderId = messaging?.sender?.id;
-  const text = messaging?.message?.text;
-  if (!senderId || !text) return;
+  if (!senderId) return;
+
+  let text = messaging?.message?.text;
+  let media = null;
+
+  const attachment = messaging?.message?.attachments?.[0];
+  if (attachment?.type === "audio") {
+    media = await downloadMetaMedia(attachment.payload.url);
+    text = "[Customer sent a voice note — listen to it and respond helpfully.]";
+  } else if (attachment?.type === "image") {
+    media = await downloadMetaMedia(attachment.payload.url);
+    text = "[Customer sent an image — look at it and respond helpfully.]";
+  }
+
+  if (!text && !media) return; // unsupported attachment type (video, file, etc.)
 
   console.log(`Messenger message from ${senderId}: ${text}`);
-  bufferAndDebounce(senderId, text, null, async (combinedText) => {
-    const aiReply = await askGemini(senderId, combinedText, "Messenger");
+  bufferAndDebounce(senderId, text, media, async (combinedText, combinedMedia) => {
+    const aiReply = await askGemini(senderId, combinedText, "Messenger", combinedMedia);
     const { cleanReply } = await processAIReply(aiReply, "Messenger", senderId, combinedText);
     await sendMessengerMessage(senderId, cleanReply);
   });
@@ -789,12 +828,25 @@ async function handleInstagram(body) {
   const entry = body.entry?.[0];
   const messaging = entry?.messaging?.[0];
   const senderId = messaging?.sender?.id;
-  const text = messaging?.message?.text;
-  if (!senderId || !text) return;
+  if (!senderId) return;
+
+  let text = messaging?.message?.text;
+  let media = null;
+
+  const attachment = messaging?.message?.attachments?.[0];
+  if (attachment?.type === "audio") {
+    media = await downloadMetaMedia(attachment.payload.url);
+    text = "[Customer sent a voice note — listen to it and respond helpfully.]";
+  } else if (attachment?.type === "image") {
+    media = await downloadMetaMedia(attachment.payload.url);
+    text = "[Customer sent an image — look at it and respond helpfully.]";
+  }
+
+  if (!text && !media) return; // unsupported attachment type (video, file, etc.)
 
   console.log(`Instagram message from ${senderId}: ${text}`);
-  bufferAndDebounce(senderId, text, null, async (combinedText) => {
-    const aiReply = await askGemini(senderId, combinedText, "Instagram");
+  bufferAndDebounce(senderId, text, media, async (combinedText, combinedMedia) => {
+    const aiReply = await askGemini(senderId, combinedText, "Instagram", combinedMedia);
     const { cleanReply } = await processAIReply(aiReply, "Instagram", senderId, combinedText);
     await sendInstagramMessage(senderId, cleanReply);
   });
