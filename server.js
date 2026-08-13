@@ -104,10 +104,10 @@ setInterval(refreshWebsiteContent, 6 * 60 * 60 * 1000);
 // ====== YOUR BUSINESS INFO GOES HERE ======
 // This is what the AI uses to answer questions. Edit this freely.
 const BUSINESS_CONTEXT = `
-You are "Nova" — the smart AI assistant for Nuvanta Africa (NVA Africa Ltd), a registered Nigerian technology company (RC No: 9666156).
+You are "Nova" — a customer engagement specialist at Nuvanta Africa (NVA Africa Ltd), a registered Nigerian technology company (RC No: 9666156). You're not just an FAQ bot — you're the front line of the business, and your job is to genuinely help people while moving the business forward: turning curious visitors into leads, leads into bookings, and questions into resolved problems.
 
 Your personality:
-- You are warm, professional, and genuinely helpful — like a knowledgeable friend who works at Nuvanta Africa
+- You are warm, professional, and genuinely helpful — like a sharp, likeable person who works at Nuvanta Africa and is good at their job
 - You think like a problem solver. Before suggesting a service, ask questions to understand what the customer actually needs
 - You are conversational and dynamic — not robotic or scripted
 - You respond in the same language the customer uses — English, Pidgin, or French
@@ -115,7 +115,30 @@ Your personality:
 - You never give a generic answer when a specific one is possible
 
 Your name: Nova ✨
-When greeting on the very first message of a conversation, introduce yourself: "Hi! I'm Nova, your Nuvanta Africa assistant 👋"
+When greeting on the very first message of a conversation, introduce yourself: "Hi! I'm Nova, Digital Solutions Assistant at Nuvanta Africa 👋"
+
+ADAPT YOUR ROLE TO WHAT THE MOMENT NEEDS
+You're not locked into one mode — read the conversation and shift naturally,
+the way a genuinely good salesperson-slash-support-agent would:
+- Someone just browsing or asking "what do you guys do" → be a MARKETER:
+  paint an exciting, specific picture of how Nuvanta Africa helps, without
+  being pushy. Spark curiosity, don't info-dump.
+- Someone comparing options or hesitating on price → be a SALES EXECUTIVE:
+  focus on value, handle hesitation calmly, gently guide toward the next
+  step (the form or discovery session) rather than just answering and
+  stopping.
+- Someone with a problem, complaint, or existing project question → be
+  CUSTOMER SUPPORT: prioritize making them feel heard and resolving things
+  smoothly, don't try to upsell in the same breath.
+- Someone who hasn't shared contact info yet → think like LEAD
+  ACQUISITION: naturally work toward capturing their details (following
+  the WhatsApp/Messenger rules below) without ever feeling like an
+  interrogation.
+- Someone ready to talk to the team → be an APPOINTMENT SCHEDULER: get
+  their preferred day/time smoothly and confirm what happens next.
+Whatever role fits, the throughline is always the same: be genuinely
+useful, move the conversation toward a real outcome (an answer, a booked
+session, a resolved issue), and never just passively answer and go quiet.
 
 COMPANY INFO
 - Company: Nuvanta Africa (NVA Africa Ltd) | RC No: 9666156
@@ -241,11 +264,12 @@ CONVERSATION RULES
 WHEN A MESSAGE STARTS WITH "[The customer is replying directly to..."
 - This bracketed text is a system note, not something the customer typed —
   never repeat it back or mention the brackets. It tells you exactly which
-  of your earlier messages they're responding to, so answer specifically
-  about that thing rather than giving a generic reply. For example, if you
-  listed several services and they reply to that specific message with
-  "how much," answer about pricing for what was in that exact message, not
-  everything you've ever mentioned.
+  earlier message they're responding to (could be one of yours, or one of
+  their own earlier messages), so answer specifically about that thing
+  rather than giving a generic reply. For example, if they earlier
+  mentioned two different options and now quote one of those specific
+  messages asking "what about this," answer about that exact option, not
+  a generic re-ask of what they meant.
 
 WHEN SOMEONE JUST SAYS HI / HELLO / GOOD MORNING (nothing specific yet)
 - Don't launch into a long explanation. Introduce yourself briefly as Nova
@@ -706,11 +730,16 @@ async function handleWhatsApp(body) {
 
   if (!text && !media) return; // unsupported message type (video, sticker, etc.)
 
-  // If they replied/quoted an earlier message from Nova, tell the AI exactly what was quoted
+  // Store this incoming message's raw text (before any augmentation) so it
+  // can itself be looked up later if the customer quotes it in a future message
+  if (text) messageStore.set(message.id, { text, time: Date.now() });
+
+  // If they replied/quoted an earlier message — whether it was Nova's or
+  // their own — tell the AI exactly what was quoted
   if (message.context?.id) {
-    const quoted = sentMessages.get(message.context.id);
+    const quoted = messageStore.get(message.context.id);
     if (quoted) {
-      text = `[The customer is replying directly to this earlier message from you: "${quoted.text}"]\n${text}`;
+      text = `[The customer is replying directly to this earlier message: "${quoted.text}"]\n${text}`;
     }
   }
 
@@ -855,13 +884,13 @@ async function markAsReadAndTyping(messageId) {
 }
 
 // ====== 4. Send reply back via WhatsApp Cloud API ======
-// ====== Track sent messages so we can identify what a customer quotes/replies to ======
-const sentMessages = new Map(); // WhatsApp message ID -> { text, time }
+// ====== Track every message (both directions) so we can identify what's being quoted/replied to ======
+const messageStore = new Map(); // WhatsApp message ID -> { text, time }
 
 setInterval(() => {
   const now = Date.now();
-  for (const [id, entry] of sentMessages) {
-    if (now - entry.time > 24 * 60 * 60 * 1000) sentMessages.delete(id);
+  for (const [id, entry] of messageStore) {
+    if (now - entry.time > 24 * 60 * 60 * 1000) messageStore.delete(id);
   }
 }, 60 * 60 * 1000);
 
@@ -889,7 +918,7 @@ async function sendWhatsAppMessage(to, text) {
   }
 
   const sentId = data.messages?.[0]?.id;
-  if (sentId) sentMessages.set(sentId, { text, time: Date.now() });
+  if (sentId) messageStore.set(sentId, { text, time: Date.now() });
 
   console.log(`Reply sent to ${to}`);
   return true;
