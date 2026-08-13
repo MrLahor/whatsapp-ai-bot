@@ -510,7 +510,7 @@ app.get("/leads", async (req, res) => {
 
 // ====== JSON API — call this from your Lovable dashboard to send a broadcast ======
 app.post("/api/broadcast", async (req, res) => {
-  const { secret, template, numbers } = req.body;
+  const { secret, template, message, numbers } = req.body;
 
   if (secret !== BROADCAST_SECRET) {
     return res.status(401).json({ error: "Wrong password" });
@@ -519,9 +519,10 @@ app.post("/api/broadcast", async (req, res) => {
     return res.status(400).json({ error: "Missing template or numbers list" });
   }
 
+  const bodyParams = message ? [message] : [];
   const results = [];
   for (const number of numbers) {
-    const success = await sendWhatsAppTemplate(number.trim(), template);
+    const success = await sendWhatsAppTemplate(number.trim(), template, bodyParams);
     results.push({ number: number.trim(), success });
   }
 
@@ -535,7 +536,10 @@ app.get("/broadcast-panel", (req, res) => {
       <h2>Send Broadcast</h2>
       <form method="POST" action="/broadcast">
         <label>Password<br><input type="password" name="secret" style="width:100%; padding:8px;" required></label><br><br>
-        <label>Template name (must be Meta-approved)<br><input type="text" name="template" style="width:100%; padding:8px;" required></label><br><br>
+        <label>Template name (e.g. weekly_update)<br><input type="text" name="template" style="width:100%; padding:8px;" required></label><br><br>
+        <label>Your message this week<br>
+          <textarea name="message" rows="4" style="width:100%; padding:8px;" placeholder="Whatever you want to tell everyone this week..."></textarea>
+        </label><br><br>
         <label>Phone numbers (one per line, international format, no + or spaces)<br>
           <textarea name="numbers" rows="8" style="width:100%; padding:8px;" required placeholder="2348143594483&#10;2348140458307"></textarea>
         </label><br><br>
@@ -546,17 +550,18 @@ app.get("/broadcast-panel", (req, res) => {
 });
 
 app.post("/broadcast", express.urlencoded({ extended: true }), async (req, res) => {
-  const { secret, template, numbers } = req.body;
+  const { secret, template, message, numbers } = req.body;
 
   if (secret !== BROADCAST_SECRET) {
     return res.send("Wrong password.");
   }
 
+  const bodyParams = message ? [message] : [];
   const numberList = numbers.split("\n").map((n) => n.trim()).filter(Boolean);
   const results = [];
 
   for (const number of numberList) {
-    const success = await sendWhatsAppTemplate(number, template);
+    const success = await sendWhatsAppTemplate(number, template, bodyParams);
     results.push(`${number}: ${success ? "sent" : "FAILED"}`);
   }
 
