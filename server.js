@@ -203,8 +203,14 @@ CONVERSATION RULES
   directly and naturally.
 - Always greet warmly and introduce yourself as Nova on the first message
   of a conversation only — don't reintroduce yourself every message.
-- Keep it SHORT — 1-5 sentences per message. If listing a few options, put
-  each on its own line, but don't over-explain.
+- CRITICAL LENGTH RULE: most replies should be 1-2 short sentences — like a
+  real person casually texting, not writing an essay. Nigerians on WhatsApp
+  have short attention spans and won't read long blocks of text. NEVER send
+  2-3 paragraphs. If you have more to say than fits in 2-3 sentences, say
+  the most important part now and let the conversation continue naturally
+  rather than dumping everything at once. If you genuinely must list
+  options, use short one-line-each bullets and nothing else — no extra
+  explaining around them.
 - Do NOT use Markdown (**bold**, dashes as bullets, # headers) — WhatsApp
   doesn't render it, it just shows literal symbols. Plain text only, or
   WhatsApp's own single-asterisk style if you truly need emphasis: *like this*.
@@ -212,7 +218,8 @@ CONVERSATION RULES
 - You can see the full conversation history below. NEVER ask for the
   customer's name, phone number, or any other detail they've already given
   earlier in this same conversation — check what they already told you first.
-- After every key response, ask a follow-up question or offer a next step.
+- After every key response, ask a follow-up question or offer a next step
+  — but keep it to ONE short question, not several.
 - If the customer references something from a previous conversation that
   ISN'T shown in the history below (meaning too much time has passed and
   the session reset), be honest: say you don't have that earlier
@@ -229,9 +236,25 @@ CONVERSATION RULES
   them through it.
 - Never promise a specific price, delivery date, or outcome without saying
   "our team will confirm this."
-- Always close with warmth: "Feel free to ask me anything else — I'm here
-  24/7 😊"
 - Match the customer's language — English, Pidgin, or French.
+
+WHEN A MESSAGE STARTS WITH "[The customer is replying directly to..."
+- This bracketed text is a system note, not something the customer typed —
+  never repeat it back or mention the brackets. It tells you exactly which
+  of your earlier messages they're responding to, so answer specifically
+  about that thing rather than giving a generic reply. For example, if you
+  listed several services and they reply to that specific message with
+  "how much," answer about pricing for what was in that exact message, not
+  everything you've ever mentioned.
+
+WHEN SOMEONE JUST SAYS HI / HELLO / GOOD MORNING (nothing specific yet)
+- Don't launch into a long explanation. Introduce yourself briefly as Nova
+  from Nuvanta Africa in 1 sentence, then offer a short guided menu so they
+  can pick what they're here for instead of having to type it out. Example
+  style: "Hi! I'm Nova from Nuvanta Africa 👋 What can I help you with today?
+  1. Website or app 2. AI chatbot/automation 3. Business registration 4.
+  TechLab training 5. Something else" — keep it that short, no extra
+  paragraph before or after it.
 
 IF THIS IS WHATSAPP
 - You already know their phone number automatically — it's how they're
@@ -248,6 +271,12 @@ IF THIS CONVERSATION IS ON MESSENGER OR INSTAGRAM (not WhatsApp)
   ask for their WhatsApp number so we can follow up and keep them updated
   there — this helps capture them as a lead even if they don't need the
   tech team right away.
+- Don't ask for their number as a blunt, standalone demand like "please
+  give me your WhatsApp number." Weave it naturally into what you're
+  already saying — for example, when confirming next steps: "I'll get our
+  team to follow up with the full details — what's the best WhatsApp
+  number to reach you on?" It should feel like a normal part of the
+  conversation, not a form field.
 - Once they show real interest, ask for their WhatsApp number specifically
   so the team can follow up there. If they don't want to share it, ask for
   their email instead.
@@ -310,7 +339,10 @@ async function summarizeConversation(senderId) {
   const summaryInstruction =
     "Summarize this customer conversation in 3-5 short sentences for a busy business owner. " +
     "Include: what they need/want, any key requirements or details they mentioned, budget or " +
-    "timeline if discussed, and their name/contact info if they gave it. Be specific, not generic.";
+    "timeline if discussed, and their name/contact info if they gave it. Be specific, not generic. " +
+    "Write in PLAIN TEXT ONLY — no Markdown, no **bold**, no bullet points with asterisks or dashes, " +
+    "no headers. Just plain flowing sentences, since this gets sent as a WhatsApp message where " +
+    "Markdown symbols show up as literal characters.";
 
   const contents = [...convo.history, { role: "user", parts: [{ text: summaryInstruction }] }];
 
@@ -607,6 +639,31 @@ async function downloadWhatsAppMedia(mediaId) {
 }
 
 // ---- WhatsApp ----
+// ====== Wait for a pause before replying (proxy for "they might still be typing") ======
+// WhatsApp/Messenger/Instagram don't expose real typing status to businesses,
+// so this waits a few seconds after each message — if more messages arrive
+// in that window, they're combined into one before the AI replies.
+const messageBuffers = new Map(); // senderId -> { texts: [], media, timer }
+const DEBOUNCE_MS = 6000;
+
+function bufferAndDebounce(senderId, text, media, onReady) {
+  let buf = messageBuffers.get(senderId);
+  if (!buf) {
+    buf = { texts: [], media: null };
+    messageBuffers.set(senderId, buf);
+  }
+  if (text) buf.texts.push(text);
+  if (media) buf.media = media;
+
+  if (buf.timer) clearTimeout(buf.timer);
+  buf.timer = setTimeout(() => {
+    const combinedText = buf.texts.join("\n");
+    const combinedMedia = buf.media;
+    messageBuffers.delete(senderId);
+    onReady(combinedText, combinedMedia);
+  }, DEBOUNCE_MS);
+}
+
 async function handleWhatsApp(body) {
   const entry = body.entry?.[0];
   const change = entry?.changes?.[0];
@@ -649,13 +706,23 @@ async function handleWhatsApp(body) {
 
   if (!text && !media) return; // unsupported message type (video, sticker, etc.)
 
+  // If they replied/quoted an earlier message from Nova, tell the AI exactly what was quoted
+  if (message.context?.id) {
+    const quoted = sentMessages.get(message.context.id);
+    if (quoted) {
+      text = `[The customer is replying directly to this earlier message from you: "${quoted.text}"]\n${text}`;
+    }
+  }
+
   console.log(`WhatsApp message from ${from}: ${text}`);
   await markAsReadAndTyping(message.id);
-  const aiReply = await askGemini(from, text, "WhatsApp", media);
-  const { cleanReply, shouldBookCall } = await processAIReply(aiReply, "WhatsApp", from, text);
 
-  await sendWhatsAppMessage(from, cleanReply);
-  if (shouldBookCall) await sendQuoteFlow(from);
+  bufferAndDebounce(from, text, media, async (combinedText, combinedMedia) => {
+    const aiReply = await askGemini(from, combinedText, "WhatsApp", combinedMedia);
+    const { cleanReply, shouldBookCall } = await processAIReply(aiReply, "WhatsApp", from, combinedText);
+    await sendWhatsAppMessage(from, cleanReply);
+    if (shouldBookCall) await sendQuoteFlow(from);
+  });
 }
 
 // ---- Facebook Messenger ----
@@ -667,9 +734,11 @@ async function handleMessenger(body) {
   if (!senderId || !text) return;
 
   console.log(`Messenger message from ${senderId}: ${text}`);
-  const aiReply = await askGemini(senderId, text, "Messenger");
-  const { cleanReply } = await processAIReply(aiReply, "Messenger", senderId, text);
-  await sendMessengerMessage(senderId, cleanReply);
+  bufferAndDebounce(senderId, text, null, async (combinedText) => {
+    const aiReply = await askGemini(senderId, combinedText, "Messenger");
+    const { cleanReply } = await processAIReply(aiReply, "Messenger", senderId, combinedText);
+    await sendMessengerMessage(senderId, cleanReply);
+  });
 }
 
 async function sendMessengerMessage(recipientId, text) {
@@ -695,9 +764,11 @@ async function handleInstagram(body) {
   if (!senderId || !text) return;
 
   console.log(`Instagram message from ${senderId}: ${text}`);
-  const aiReply = await askGemini(senderId, text, "Instagram");
-  const { cleanReply } = await processAIReply(aiReply, "Instagram", senderId, text);
-  await sendInstagramMessage(senderId, cleanReply);
+  bufferAndDebounce(senderId, text, null, async (combinedText) => {
+    const aiReply = await askGemini(senderId, combinedText, "Instagram");
+    const { cleanReply } = await processAIReply(aiReply, "Instagram", senderId, combinedText);
+    await sendInstagramMessage(senderId, cleanReply);
+  });
 }
 
 async function sendInstagramMessage(recipientId, text) {
@@ -784,6 +855,16 @@ async function markAsReadAndTyping(messageId) {
 }
 
 // ====== 4. Send reply back via WhatsApp Cloud API ======
+// ====== Track sent messages so we can identify what a customer quotes/replies to ======
+const sentMessages = new Map(); // WhatsApp message ID -> { text, time }
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of sentMessages) {
+    if (now - entry.time > 24 * 60 * 60 * 1000) sentMessages.delete(id);
+  }
+}, 60 * 60 * 1000);
+
 async function sendWhatsAppMessage(to, text) {
   const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
 
@@ -806,6 +887,10 @@ async function sendWhatsAppMessage(to, text) {
     console.error("WhatsApp send failed:", JSON.stringify(data));
     return false;
   }
+
+  const sentId = data.messages?.[0]?.id;
+  if (sentId) sentMessages.set(sentId, { text, time: Date.now() });
+
   console.log(`Reply sent to ${to}`);
   return true;
 }
