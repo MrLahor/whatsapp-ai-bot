@@ -38,26 +38,68 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "PASTE_YOUR_PAGE_ACCE
 const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN || "PASTE_YOUR_INSTAGRAM_ACCESS_TOKEN_HERE";
 const IG_ACCOUNT_ID = process.env.IG_ACCOUNT_ID || "PASTE_YOUR_INSTAGRAM_ACCOUNT_ID_HERE";
 
-// ====== CONVERSATION MEMORY (per customer, auto-expires after 24h of silence) ======
-const conversations = new Map(); // key: sender ID, value: { history: [...], lastMessageTime }
-const SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+// ====== CONVERSATION MEMORY (per customer, persisted in Supabase so it ======
+// ====== survives server restarts — not just kept in RAM) ======
+const SESSION_TIMEOUT_MS = Number(process.env.SESSION_TIMEOUT_HOURS || 48) * 60 * 60 * 1000;
+const conversationCache = new Map(); // in-process cache, avoids hitting Supabase on every message in a fast back-and-forth
 
-function getConversation(senderId) {
+async function getConversation(senderId) {
   const now = Date.now();
-  const existing = conversations.get(senderId);
-  if (existing && now - existing.lastMessageTime < SESSION_TIMEOUT_MS) {
-    return existing;
+
+  const cached = conversationCache.get(senderId);
+  if (cached && now - cached.lastMessageTime < SESSION_TIMEOUT_MS) {
+    return cached;
   }
+
+  // Not in memory (likely a fresh server start) — check Supabase for a still-valid session
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/conversations?sender_id=eq.${encodeURIComponent(senderId)}&select=*`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    const rows = await response.json();
+    const row = rows?.[0];
+    if (row && now - new Date(row.last_message_time).getTime() < SESSION_TIMEOUT_MS) {
+      const restored = { history: row.history || [], lastMessageTime: new Date(row.last_message_time).getTime() };
+      conversationCache.set(senderId, restored);
+      return restored;
+    }
+  } catch (err) {
+    console.error("Failed to load conversation from Supabase:", err);
+  }
+
   const fresh = { history: [], lastMessageTime: now };
-  conversations.set(senderId, fresh);
+  conversationCache.set(senderId, fresh);
   return fresh;
 }
 
-// Periodic cleanup so memory doesn't grow forever with old, expired sessions
+async function saveConversation(senderId, convo) {
+  conversationCache.set(senderId, convo);
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/conversations`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates",
+      },
+      body: JSON.stringify({
+        sender_id: senderId,
+        history: convo.history,
+        last_message_time: new Date(convo.lastMessageTime).toISOString(),
+      }),
+    });
+  } catch (err) {
+    console.error("Failed to save conversation to Supabase:", err);
+  }
+}
+
+// Periodic cleanup of the in-process cache only — Supabase rows are cheap to keep
 setInterval(() => {
   const now = Date.now();
-  for (const [id, convo] of conversations) {
-    if (now - convo.lastMessageTime > SESSION_TIMEOUT_MS) conversations.delete(id);
+  for (const [id, convo] of conversationCache) {
+    if (now - convo.lastMessageTime > SESSION_TIMEOUT_MS) conversationCache.delete(id);
   }
 }, 60 * 60 * 1000);
 
@@ -374,7 +416,7 @@ async function saveLead(platform, senderId, leadData) {
 
 // ====== Summarize a full conversation for the owner alert (not just the last message) ======
 async function summarizeConversation(senderId) {
-  const convo = getConversation(senderId);
+  const convo = await getConversation(senderId);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
 
   const summaryInstruction =
@@ -570,7 +612,7 @@ app.post("/broadcast", express.urlencoded({ extended: true }), async (req, res) 
 
 async function sendWhatsAppTemplate(to, templateName, bodyParams = []) {
   const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
-  const template = { name: templateName, language: { code: "en_US" } };
+  const template = { name: templateName, language: { code: "en" } };
   if (bodyParams.length) {
     template.components = [{ type: "body", parameters: bodyParams.map((p) => ({ type: "text", text: p })) }];
   }
@@ -878,8 +920,17 @@ async function sendInstagramMessage(recipientId, text) {
 async function askGemini(senderId, userMessage, platform, media = null) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
 
-  const convo = getConversation(senderId);
-  const fullContext = `${BUSINESS_CONTEXT}\n\nCURRENT PLATFORM: ${platform}\n\nLIVE WEBSITE CONTENT (most current info — prefer this over anything above if they conflict):\n${cachedWebsiteContent}`;
+  const convo = await getConversation(senderId);
+
+  const nigeriaTime = new Date().toLocaleString("en-US", {
+    timeZone: "Africa/Lagos",
+    weekday: "long",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+
+  const fullContext = `${BUSINESS_CONTEXT}\n\nCURRENT PLATFORM: ${platform}\n\nCURRENT DATE/TIME IN NIGERIA: ${nigeriaTime}. Use this to greet appropriately (good morning/afternoon/evening/night) and never say something time-inappropriate like "have a great day" in the evening.\n\nLIVE WEBSITE CONTENT (most current info — prefer this over anything above if they conflict):\n${cachedWebsiteContent}`;
 
   const currentParts = [{ text: userMessage }];
   if (media) {
@@ -910,10 +961,12 @@ async function askGemini(senderId, userMessage, platform, media = null) {
   const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
   const finalReply = reply || "Sorry, I'm having trouble responding right now — a team member will follow up shortly.";
 
-  // Save this exchange into memory for next time
+  // Save this exchange — both to the fast in-process cache and persisted to
+  // Supabase, so it survives a server restart
   convo.history.push({ role: "user", parts: [{ text: userMessage }] });
   convo.history.push({ role: "model", parts: [{ text: finalReply }] });
   convo.lastMessageTime = Date.now();
+  await saveConversation(senderId, convo);
 
   return finalReply;
 }
