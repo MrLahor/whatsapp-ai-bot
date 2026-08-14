@@ -30,6 +30,9 @@ const CRM_SECRET = process.env.CRM_SECRET || "PASTE_A_PASSWORD_HERE"; // for vie
 // ====== ALERT YOU WHEN A HUMAN NEEDS TO STEP IN ======
 const OWNER_WHATSAPP_NUMBER = process.env.OWNER_WHATSAPP_NUMBER || "2348143594483";
 const BASE_URL = process.env.BASE_URL || "https://whatsapp-ai-bot-b134.onrender.com";
+// If any of your approved templates have an IMAGE header, put a public image
+// URL here (e.g. your logo on your website). Leave as-is if none need one.
+const TEMPLATE_HEADER_IMAGE = process.env.TEMPLATE_HEADER_IMAGE || "";
 
 // ====== FACEBOOK MESSENGER ======
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || "PASTE_YOUR_PAGE_ACCESS_TOKEN_HERE";
@@ -564,7 +567,7 @@ app.post("/api/broadcast", async (req, res) => {
   const bodyParams = message ? [message] : [];
   const results = [];
   for (const number of numbers) {
-    const success = await sendWhatsAppTemplate(number.trim(), template, bodyParams);
+    const success = await sendWhatsAppTemplate(number.trim(), template, bodyParams, TEMPLATE_HEADER_IMAGE || null);
     results.push({ number: number.trim(), success });
   }
 
@@ -603,19 +606,26 @@ app.post("/broadcast", express.urlencoded({ extended: true }), async (req, res) 
   const results = [];
 
   for (const number of numberList) {
-    const success = await sendWhatsAppTemplate(number, template, bodyParams);
+    const success = await sendWhatsAppTemplate(number, template, bodyParams, TEMPLATE_HEADER_IMAGE || null);
     results.push(`${number}: ${success ? "sent" : "FAILED"}`);
   }
 
   res.send(`<pre>${results.join("\n")}</pre><br><a href="/broadcast-panel">Send another</a>`);
 });
 
-async function sendWhatsAppTemplate(to, templateName, bodyParams = []) {
+async function sendWhatsAppTemplate(to, templateName, bodyParams = [], headerImageUrl = null) {
   const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
   const template = { name: templateName, language: { code: "en" } };
-  if (bodyParams.length) {
-    template.components = [{ type: "body", parameters: bodyParams.map((p) => ({ type: "text", text: p })) }];
+  const components = [];
+
+  if (headerImageUrl) {
+    components.push({ type: "header", parameters: [{ type: "image", image: { link: headerImageUrl } }] });
   }
+  if (bodyParams.length) {
+    components.push({ type: "body", parameters: bodyParams.map((p) => ({ type: "text", text: p })) });
+  }
+  if (components.length) template.components = components;
+
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -625,7 +635,7 @@ async function sendWhatsAppTemplate(to, templateName, bodyParams = []) {
     body: JSON.stringify({ messaging_product: "whatsapp", to, type: "template", template }),
   });
   const data = await response.json();
-  if (!response.ok) console.error(`Template send to ${to} failed:`, JSON.stringify(data));
+  if (!response.ok) console.error(`Template "${templateName}" send to ${to} failed:`, JSON.stringify(data));
   return response.ok;
 }
 
@@ -638,7 +648,7 @@ async function notifyOwner(summary) {
   const sent = await sendWhatsAppMessage(OWNER_WHATSAPP_NUMBER, `🔔 Human needed:\n\n${summary}`);
   if (!sent) {
     console.log("Instant alert failed, falling back to template...");
-    await sendWhatsAppTemplate(OWNER_WHATSAPP_NUMBER, "lead_alert", [summary.slice(0, 1000)]);
+    await sendWhatsAppTemplate(OWNER_WHATSAPP_NUMBER, "lead_alert", [summary.slice(0, 1000)], TEMPLATE_HEADER_IMAGE || null);
   }
 }
 
