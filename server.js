@@ -4,6 +4,7 @@
 const express = require("express");
 const cheerio = require("cheerio");
 const cors = require("cors");
+const PDFDocument = require("pdfkit");
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -398,6 +399,21 @@ TECHNICAL NOTE — BOOKING TAG (invisible to the customer)
 - Only use this when they're genuinely ready to move forward, not for
   casual pricing questions.
 
+TECHNICAL NOTE — PAYMENT CLAIMS (invisible to the customer)
+- When a customer says they've made a payment (bank transfer or otherwise),
+  do NOT promise or send a receipt yourself — you can't confirm payments,
+  only a human checking the bank account can. Respond warmly but honestly:
+  something like "Thanks! We're confirming this now, it usually doesn't
+  take long. You'll get your receipt automatically the moment it's
+  confirmed." Then include this exact tag anywhere in your reply (removed
+  before the customer sees it):
+  [PAYMENT_CLAIM:{"name":"their name if known","service":"what they say they paid for","amount":"the amount they mentioned","notes":"anything else relevant"}]
+- If a PAYMENT STATUS note appears in your context below, use it to answer
+  naturally if they ask about their payment — e.g. if it's still pending,
+  reassure them it's being checked; if it's confirmed, remind them their
+  receipt was already sent. Don't repeat the [PAYMENT_CLAIM] tag for a
+  payment that's already showing as pending or confirmed in that note.
+
 TECHNICAL NOTE — SAVING LEAD INFO (invisible to the customer)
 - Only use this for genuine potential CUSTOMERS interested in a paid
   service — not for job seekers, internship inquiries, media, partners, or
@@ -510,6 +526,20 @@ async function processAIReply(aiReply, platform, senderId, userMessage) {
     cleanReply = cleanReply.replace(saveLeadMatch[0], "").trim();
   }
 
+  const paymentClaimMatch = cleanReply.match(/\[PAYMENT_CLAIM:(\{.*?\})\]/);
+  if (paymentClaimMatch) {
+    try {
+      const claimData = JSON.parse(paymentClaimMatch[1]);
+      await savePaymentClaim(platform, senderId, claimData);
+      await notifyOwner(
+        `Payment claim (${platform})\nCustomer: ${senderId}\nName: ${claimData.name || "-"}\nService: ${claimData.service || "-"}\nAmount claimed: ${claimData.amount || "-"}\n\nCheck your bank, then confirm at: ${BASE_URL}/pending-payments`
+      );
+    } catch (err) {
+      console.error("Failed to parse PAYMENT_CLAIM tag:", err);
+    }
+    cleanReply = cleanReply.replace(paymentClaimMatch[0], "").trim();
+  }
+
   if (cleanReply.startsWith("[BOOK_CALL]")) {
     shouldBookCall = true;
     cleanReply = cleanReply.replace("[BOOK_CALL]", "").trim();
@@ -566,6 +596,213 @@ app.post("/book-session", express.urlencoded({ extended: true }), async (req, re
 });
 
 // ====== Leads dashboard — simple password-protected page to view your CRM ======
+// ====== Generate a payment receipt PDF ======
+function generateReceiptPDF({ customerName, service, amount, date, receiptNumber }) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 50 });
+    const chunks = [];
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    doc.fontSize(20).text("Nuvanta Africa", { align: "center" });
+    doc.fontSize(10).fillColor("#555").text("NVA Africa Ltd | RC No: 9666156", { align: "center" });
+    doc.moveDown(2);
+
+    doc.fontSize(16).fillColor("#000").text("Payment Receipt", { align: "center" });
+    doc.moveDown();
+    doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
+    doc.moveDown();
+
+    doc.fontSize(11);
+    doc.text(`Receipt No: ${receiptNumber}`);
+    doc.text(`Date: ${date}`);
+    doc.moveDown();
+    doc.text(`Received from: ${customerName}`);
+    doc.text(`For: ${service}`);
+    doc.moveDown();
+
+    doc.fontSize(14).text(`Amount Paid: ₦${amount}`, { align: "left" });
+    doc.moveDown(3);
+
+    doc.fontSize(10).fillColor("#555").text("Thank you for your business!", { align: "center" });
+    doc.text("Nuvanta Africa | nuvanta.africa | 08143594483", { align: "center" });
+
+    doc.end();
+  });
+}
+
+// ====== Upload a file to WhatsApp so it can be sent as a document ======
+async function uploadWhatsAppMedia(buffer, mimeType, filename) {
+  const form = new FormData();
+  form.append("messaging_product", "whatsapp");
+  form.append("file", new Blob([buffer], { type: mimeType }), filename);
+
+  const response = await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/media`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+    body: form,
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    console.error("Media upload failed:", JSON.stringify(data));
+    return null;
+  }
+  return data.id;
+}
+
+async function sendWhatsAppDocument(to, mediaId, filename, caption) {
+  const response = await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "document",
+      document: { id: mediaId, filename, caption },
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) console.error("Document send failed:", JSON.stringify(data));
+  return response.ok;
+}
+
+// ====== Save a customer's payment claim as "pending" ======
+async function savePaymentClaim(platform, senderId, claimData) {
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/payments`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify({
+        platform,
+        sender_id: senderId,
+        phone: platform === "WhatsApp" ? senderId : claimData.phone || null,
+        customer_name: claimData.name || null,
+        service: claimData.service || null,
+        amount: claimData.amount || null,
+        notes: claimData.notes || null,
+        status: "pending",
+      }),
+    });
+    if (!response.ok) console.error("Failed to save payment claim:", await response.text());
+  } catch (err) {
+    console.error("Error saving payment claim:", err);
+  }
+}
+
+// ====== Look up this customer's most recent payment status, for context ======
+async function getPaymentStatus(senderId) {
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/payments?sender_id=eq.${encodeURIComponent(senderId)}&order=id.desc&limit=1&select=*`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    const rows = await response.json();
+    return rows?.[0] || null;
+  } catch (err) {
+    console.error("Failed to look up payment status:", err);
+    return null;
+  }
+}
+
+// ====== Pending payments admin page — see claims and confirm with one click ======
+app.get("/pending-payments", async (req, res) => {
+  if (req.query.secret !== BROADCAST_SECRET) {
+    return res.send('<form>Password: <input type="password" name="secret"><button>View</button></form>');
+  }
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/payments?status=eq.pending&order=id.desc`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    const pending = await response.json();
+    const rows = pending
+      .map(
+        (p) => `<tr>
+          <td>${p.customer_name || "-"}</td>
+          <td>${p.phone || p.sender_id}</td>
+          <td>${p.service || "-"}</td>
+          <td>₦${p.amount || "-"}</td>
+          <td>${p.notes || "-"}</td>
+          <td><a href="/confirm-payment?id=${p.id}&secret=${req.query.secret}" style="background:#0F5132;color:white;padding:6px 12px;text-decoration:none;border-radius:4px;">Confirm & Send Receipt</a></td>
+        </tr>`
+      )
+      .join("");
+    res.send(`
+      <html><body style="font-family: sans-serif;">
+        <h2>Pending Payments (${pending.length})</h2>
+        <table border="1" cellpadding="8" style="border-collapse: collapse;">
+          <tr><th>Name</th><th>Contact</th><th>Service</th><th>Amount</th><th>Notes</th><th>Action</th></tr>
+          ${rows}
+        </table>
+      </body></html>
+    `);
+  } catch (err) {
+    res.send("Error loading pending payments: " + err.message);
+  }
+});
+
+// ====== Confirm a payment — generates and sends the receipt automatically ======
+app.get("/confirm-payment", async (req, res) => {
+  const { id, secret } = req.query;
+  if (secret !== BROADCAST_SECRET) return res.send("Wrong password.");
+
+  try {
+    const getRes = await fetch(`${SUPABASE_URL}/rest/v1/payments?id=eq.${id}&select=*`, {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+    });
+    const rows = await getRes.json();
+    const payment = rows?.[0];
+    if (!payment) return res.send("Payment claim not found.");
+
+    const receiptNumber = `NVA-${Date.now().toString().slice(-8)}`;
+    const date = new Date().toLocaleDateString("en-GB", { timeZone: "Africa/Lagos" });
+
+    const pdfBuffer = await generateReceiptPDF({
+      customerName: payment.customer_name || "Customer",
+      service: payment.service || "Services rendered",
+      amount: payment.amount || "0",
+      date,
+      receiptNumber,
+    });
+    const mediaId = await uploadWhatsAppMedia(pdfBuffer, "application/pdf", `Receipt-${receiptNumber}.pdf`);
+
+    let sent = false;
+    if (mediaId && payment.platform === "WhatsApp") {
+      sent = await sendWhatsAppDocument(
+        payment.phone || payment.sender_id,
+        mediaId,
+        `Receipt-${receiptNumber}.pdf`,
+        `Your payment has been confirmed! Here's your receipt, ${payment.customer_name || ""}. Thank you 🙏`
+      );
+    }
+
+    await fetch(`${SUPABASE_URL}/rest/v1/payments?id=eq.${id}`, {
+      method: "PATCH",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ status: "confirmed", receipt_number: receiptNumber }),
+    });
+
+    res.send(
+      sent
+        ? `Confirmed! Receipt ${receiptNumber} sent automatically. <br><a href="/pending-payments?secret=${secret}">Back to pending</a>`
+        : `Marked confirmed, but the WhatsApp send may have failed (check Render logs), or this was a Messenger/Instagram lead without an auto-send path yet. <br><a href="/pending-payments?secret=${secret}">Back to pending</a>`
+    );
+  } catch (err) {
+    console.error("Confirm payment failed:", err);
+    res.send("Something went wrong. Check Render logs.");
+  }
+});
+
 app.get("/leads", async (req, res) => {
   if (req.query.secret !== CRM_SECRET) {
     return res.send('<form>Password: <input type="password" name="secret"><button>View</button></form>');
@@ -1003,6 +1240,16 @@ async function askGemini(senderId, userMessage, platform, media = null) {
     }
   }
 
+  let paymentStatusNote = "";
+  const paymentStatus = await getPaymentStatus(senderId);
+  if (paymentStatus) {
+    if (paymentStatus.status === "pending") {
+      paymentStatusNote = `\n\nPAYMENT STATUS: This customer has a PENDING payment claim (${paymentStatus.service || "unspecified"}, ₦${paymentStatus.amount || "unspecified"}) awaiting confirmation. If they ask about it, reassure them it's being checked and they'll get their receipt automatically once confirmed — don't create a new [PAYMENT_CLAIM] tag for this same one.`;
+    } else if (paymentStatus.status === "confirmed") {
+      paymentStatusNote = `\n\nPAYMENT STATUS: This customer's most recent payment (${paymentStatus.service || "unspecified"}, ₦${paymentStatus.amount || "unspecified"}) is CONFIRMED, receipt ${paymentStatus.receipt_number} was already sent. If they ask, let them know it's confirmed and their receipt was sent — don't create a new claim.`;
+    }
+  }
+
   const nigeriaTime = new Date().toLocaleString("en-US", {
     timeZone: "Africa/Lagos",
     weekday: "long",
@@ -1011,7 +1258,7 @@ async function askGemini(senderId, userMessage, platform, media = null) {
     hour12: true,
   });
 
-  const fullContext = `${BUSINESS_CONTEXT}\n\nCURRENT PLATFORM: ${platform}\n\nCURRENT DATE/TIME IN NIGERIA: ${nigeriaTime}. Use this to greet appropriately (good morning/afternoon/evening/night) and never say something time-inappropriate like "have a great day" in the evening.${knownNameNote}\n\nLIVE WEBSITE CONTENT (most current info — prefer this over anything above if they conflict):\n${cachedWebsiteContent}`;
+  const fullContext = `${BUSINESS_CONTEXT}\n\nCURRENT PLATFORM: ${platform}\n\nCURRENT DATE/TIME IN NIGERIA: ${nigeriaTime}. Use this to greet appropriately (good morning/afternoon/evening/night) and never say something time-inappropriate like "have a great day" in the evening.${knownNameNote}${paymentStatusNote}\n\nLIVE WEBSITE CONTENT (most current info — prefer this over anything above if they conflict):\n${cachedWebsiteContent}`;
 
   const currentParts = [{ text: userMessage }];
   if (media) {
