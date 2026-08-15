@@ -191,6 +191,29 @@ two different customers ask the same question, your replies to them should
 feel like a real conversation each time, not the same canned paragraph
 copy-pasted twice.
 
+USE DISCRETION — NOT EVERYONE IS A CUSTOMER
+Before jumping into sales/service mode, think about who you're actually
+talking to. Not every message is someone wanting to buy something —
+recognize these situations and respond appropriately instead of forcing
+them into your usual sales flow:
+- Someone asking about a JOB, INTERNSHIP, IT industrial training/SIWES
+  placement, or wanting to work at Nuvanta Africa — this is a
+  recruitment/HR matter, not a sales opportunity. Do NOT offer to sell
+  them a service (like CV writing) just because a keyword matches
+  something in your service list. Instead, be warm and direct them
+  properly: "For internship or job opportunities, please send your CV and
+  a short intro to nuvantaafrica@gmail.com and our team will review it."
+- Someone from the media, a potential business partner, a vendor trying to
+  sell Nuvanta Africa something, or anyone clearly not seeking your
+  services — acknowledge them politely and direct them to
+  nuvantaafrica@gmail.com rather than running your usual sales playbook on
+  them.
+- If a message seems like it was meant for someone else, or is unrelated
+  spam, respond briefly and don't force a sales conversation out of it.
+Always think first: "Is this person actually here to buy or learn about
+our services, or are they here for a different reason?" — then respond
+like a rational person would, not like a script running on autopilot.
+
 COMPANY INFO
 - Company: Nuvanta Africa (NVA Africa Ltd) | RC No: 9666156
 - Website: nuvanta.africa | WhatsApp/Phone: 08143594483 | Email: nuvantaafrica@gmail.com
@@ -376,6 +399,10 @@ TECHNICAL NOTE — BOOKING TAG (invisible to the customer)
   casual pricing questions.
 
 TECHNICAL NOTE — SAVING LEAD INFO (invisible to the customer)
+- Only use this for genuine potential CUSTOMERS interested in a paid
+  service — not for job seekers, internship inquiries, media, partners, or
+  vendors. Those get directed to nuvantaafrica@gmail.com instead, per the
+  discretion guidance above, and should not be saved as a sales lead.
 - On WhatsApp: once you know their NAME and what they want (service), save
   immediately — phone number is filled in automatically by the system, you
   don't need to have it or ask for it.
@@ -390,6 +417,21 @@ TECHNICAL NOTE — SAVING LEAD INFO (invisible to the customer)
 `;
 
 // ====== Save a lead to the custom CRM (Supabase) ======
+// ====== Look up a returning customer's name from their lead history ======
+async function getKnownName(senderId) {
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/leads?sender_id=eq.${encodeURIComponent(senderId)}&name=not.is.null&order=created_at.desc&limit=1&select=name`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    const rows = await response.json();
+    return rows?.[0]?.name || null;
+  } catch (err) {
+    console.error("Failed to look up known name:", err);
+    return null;
+  }
+}
+
 async function saveLead(platform, senderId, leadData) {
   try {
     const response = await fetch(`${SUPABASE_URL}/rest/v1/leads`, {
@@ -564,11 +606,17 @@ app.post("/api/broadcast", async (req, res) => {
     return res.status(400).json({ error: "Missing template or numbers list" });
   }
 
-  const bodyParams = message ? [message] : [];
   const results = [];
   for (const number of numbers) {
-    const success = await sendWhatsAppTemplate(number.trim(), template, bodyParams, TEMPLATE_HEADER_IMAGE || null);
-    results.push({ number: number.trim(), success });
+    const cleanNumber = number.trim();
+    let personalizedMessage = message || "";
+    if (personalizedMessage.includes("{{name}}")) {
+      const knownName = await getKnownName(cleanNumber);
+      personalizedMessage = personalizedMessage.replace(/\{\{name\}\}/gi, knownName || "there");
+    }
+    const bodyParams = personalizedMessage ? [personalizedMessage] : [];
+    const success = await sendWhatsAppTemplate(cleanNumber, template, bodyParams, TEMPLATE_HEADER_IMAGE || null);
+    results.push({ number: cleanNumber, success });
   }
 
   res.json({ sent: results.filter((r) => r.success).length, failed: results.filter((r) => !r.success).length, results });
@@ -582,8 +630,8 @@ app.get("/broadcast-panel", (req, res) => {
       <form method="POST" action="/broadcast">
         <label>Password<br><input type="password" name="secret" style="width:100%; padding:8px;" required></label><br><br>
         <label>Template name (e.g. weekly_update)<br><input type="text" name="template" style="width:100%; padding:8px;" required></label><br><br>
-        <label>Your message this week<br>
-          <textarea name="message" rows="4" style="width:100%; padding:8px;" placeholder="Whatever you want to tell everyone this week..."></textarea>
+        <label>Your message this week (type {{name}} anywhere to personalize per recipient)<br>
+          <textarea name="message" rows="4" style="width:100%; padding:8px;" placeholder="Hi {{name}}, exciting news this week..."></textarea>
         </label><br><br>
         <label>Phone numbers (one per line, international format, no + or spaces)<br>
           <textarea name="numbers" rows="8" style="width:100%; padding:8px;" required placeholder="2348143594483&#10;2348140458307"></textarea>
@@ -601,11 +649,16 @@ app.post("/broadcast", express.urlencoded({ extended: true }), async (req, res) 
     return res.send("Wrong password.");
   }
 
-  const bodyParams = message ? [message] : [];
   const numberList = numbers.split("\n").map((n) => n.trim()).filter(Boolean);
   const results = [];
 
   for (const number of numberList) {
+    let personalizedMessage = message || "";
+    if (personalizedMessage.includes("{{name}}")) {
+      const knownName = await getKnownName(number);
+      personalizedMessage = personalizedMessage.replace(/\{\{name\}\}/gi, knownName || "there");
+    }
+    const bodyParams = personalizedMessage ? [personalizedMessage] : [];
     const success = await sendWhatsAppTemplate(number, template, bodyParams, TEMPLATE_HEADER_IMAGE || null);
     results.push(`${number}: ${success ? "sent" : "FAILED"}`);
   }
@@ -932,6 +985,14 @@ async function askGemini(senderId, userMessage, platform, media = null) {
 
   const convo = await getConversation(senderId);
 
+  let knownNameNote = "";
+  if (convo.history.length === 0) {
+    const knownName = await getKnownName(senderId);
+    if (knownName) {
+      knownNameNote = `\n\nRETURNING CUSTOMER: This is a new session, but we've spoken with this customer before and know their name is ${knownName}. Greet them warmly by name (e.g. "Hey ${knownName}, welcome back! 👋") instead of your full generic first-time introduction, and don't ask for their name again since we already have it.`;
+    }
+  }
+
   const nigeriaTime = new Date().toLocaleString("en-US", {
     timeZone: "Africa/Lagos",
     weekday: "long",
@@ -940,7 +1001,7 @@ async function askGemini(senderId, userMessage, platform, media = null) {
     hour12: true,
   });
 
-  const fullContext = `${BUSINESS_CONTEXT}\n\nCURRENT PLATFORM: ${platform}\n\nCURRENT DATE/TIME IN NIGERIA: ${nigeriaTime}. Use this to greet appropriately (good morning/afternoon/evening/night) and never say something time-inappropriate like "have a great day" in the evening.\n\nLIVE WEBSITE CONTENT (most current info — prefer this over anything above if they conflict):\n${cachedWebsiteContent}`;
+  const fullContext = `${BUSINESS_CONTEXT}\n\nCURRENT PLATFORM: ${platform}\n\nCURRENT DATE/TIME IN NIGERIA: ${nigeriaTime}. Use this to greet appropriately (good morning/afternoon/evening/night) and never say something time-inappropriate like "have a great day" in the evening.${knownNameNote}\n\nLIVE WEBSITE CONTENT (most current info — prefer this over anything above if they conflict):\n${cachedWebsiteContent}`;
 
   const currentParts = [{ text: userMessage }];
   if (media) {
