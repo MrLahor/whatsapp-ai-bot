@@ -666,6 +666,13 @@ app.post("/broadcast", express.urlencoded({ extended: true }), async (req, res) 
   res.send(`<pre>${results.join("\n")}</pre><br><a href="/broadcast-panel">Send another</a>`);
 });
 
+// Template parameters can't contain line breaks, tabs, or 4+ consecutive
+// spaces — WhatsApp rejects those outright. Clean automatically so every
+// caller doesn't need to remember this.
+function sanitizeTemplateParam(text) {
+  return text.replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
+}
+
 async function sendWhatsAppTemplate(to, templateName, bodyParams = [], headerImageUrl = null) {
   const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
   const template = { name: templateName, language: { code: "en" } };
@@ -675,7 +682,10 @@ async function sendWhatsAppTemplate(to, templateName, bodyParams = [], headerIma
     components.push({ type: "header", parameters: [{ type: "image", image: { link: headerImageUrl } }] });
   }
   if (bodyParams.length) {
-    components.push({ type: "body", parameters: bodyParams.map((p) => ({ type: "text", text: p })) });
+    components.push({
+      type: "body",
+      parameters: bodyParams.map((p) => ({ type: "text", text: sanitizeTemplateParam(p) })),
+    });
   }
   if (components.length) template.components = components;
 
