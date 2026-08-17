@@ -510,7 +510,7 @@ async function summarizeConversation(senderId) {
 }
 
 // ====== Process an AI reply: strip special tags, act on them, return clean text ======
-async function processAIReply(aiReply, platform, senderId, userMessage) {
+async function processAIReply(aiReply, platform, senderId, userMessage, phoneNumberId = PHONE_NUMBER_ID) {
   let cleanReply = aiReply;
   let shouldBookCall = false;
 
@@ -534,7 +534,7 @@ async function processAIReply(aiReply, platform, senderId, userMessage) {
   if (paymentClaimMatch) {
     try {
       const claimData = JSON.parse(paymentClaimMatch[1]);
-      await savePaymentClaim(platform, senderId, claimData);
+      await savePaymentClaim(platform, senderId, claimData, phoneNumberId);
       await notifyOwner(
         `Payment claim (${platform})\nCustomer: ${senderId}\nName: ${claimData.name || "-"}\nService: ${claimData.service || "-"}\nAmount claimed: ${claimData.amount || "-"}\n\nCheck your bank, then confirm at: ${BASE_URL}/pending-payments`
       );
@@ -637,12 +637,12 @@ function generateReceiptPDF({ customerName, service, amount, date, receiptNumber
 }
 
 // ====== Upload a file to WhatsApp so it can be sent as a document ======
-async function uploadWhatsAppMedia(buffer, mimeType, filename) {
+async function uploadWhatsAppMedia(buffer, mimeType, filename, phoneNumberId = PHONE_NUMBER_ID) {
   const form = new FormData();
   form.append("messaging_product", "whatsapp");
   form.append("file", new Blob([buffer], { type: mimeType }), filename);
 
-  const response = await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/media`, {
+  const response = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/media`, {
     method: "POST",
     headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
     body: form,
@@ -655,8 +655,8 @@ async function uploadWhatsAppMedia(buffer, mimeType, filename) {
   return data.id;
 }
 
-async function sendWhatsAppDocument(to, mediaId, filename, caption) {
-  const response = await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`, {
+async function sendWhatsAppDocument(to, mediaId, filename, caption, phoneNumberId = PHONE_NUMBER_ID) {
+  const response = await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
     method: "POST",
     headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -672,7 +672,7 @@ async function sendWhatsAppDocument(to, mediaId, filename, caption) {
 }
 
 // ====== Save a customer's payment claim as "pending" ======
-async function savePaymentClaim(platform, senderId, claimData) {
+async function savePaymentClaim(platform, senderId, claimData, phoneNumberId = PHONE_NUMBER_ID) {
   try {
     const response = await fetch(`${SUPABASE_URL}/rest/v1/payments`, {
       method: "POST",
@@ -686,6 +686,7 @@ async function savePaymentClaim(platform, senderId, claimData) {
         platform,
         sender_id: senderId,
         phone: platform === "WhatsApp" ? senderId : claimData.phone || null,
+        phone_number_id: phoneNumberId,
         customer_name: claimData.name || null,
         service: claimData.service || null,
         amount: claimData.amount || null,
@@ -776,6 +777,7 @@ app.get("/confirm-payment", async (req, res) => {
 
     const receiptNumber = `NVA-${Date.now().toString().slice(-8)}`;
     const date = new Date().toLocaleDateString("en-GB", { timeZone: "Africa/Lagos" });
+    const claimPhoneNumberId = payment.phone_number_id || PHONE_NUMBER_ID;
 
     const pdfBuffer = await generateReceiptPDF({
       customerName: payment.customer_name || "Customer",
@@ -784,7 +786,7 @@ app.get("/confirm-payment", async (req, res) => {
       date,
       receiptNumber,
     });
-    const mediaId = await uploadWhatsAppMedia(pdfBuffer, "application/pdf", `Receipt-${receiptNumber}.pdf`);
+    const mediaId = await uploadWhatsAppMedia(pdfBuffer, "application/pdf", `Receipt-${receiptNumber}.pdf`, claimPhoneNumberId);
 
     let sent = false;
     if (mediaId && payment.platform === "WhatsApp") {
@@ -792,7 +794,8 @@ app.get("/confirm-payment", async (req, res) => {
         payment.phone || payment.sender_id,
         mediaId,
         `Receipt-${receiptNumber}.pdf`,
-        `Your payment has been confirmed! Here's your receipt, ${payment.customer_name || ""}. Thank you 🙏`
+        `Your payment has been confirmed! Here's your receipt, ${payment.customer_name || ""}. Thank you 🙏`,
+        claimPhoneNumberId
       );
     }
 
@@ -1148,7 +1151,7 @@ async function handleWhatsApp(body) {
 
   bufferAndDebounce(from, text, media, async (combinedText, combinedMedia) => {
     const aiReply = await askGemini(from, combinedText, "WhatsApp", combinedMedia);
-    const { cleanReply, shouldBookCall } = await processAIReply(aiReply, "WhatsApp", from, combinedText);
+    const { cleanReply, shouldBookCall } = await processAIReply(aiReply, "WhatsApp", from, combinedText, receivingPhoneNumberId);
     await sendWhatsAppMessage(from, cleanReply, receivingPhoneNumberId);
     if (shouldBookCall) await sendQuoteFlow(from, receivingPhoneNumberId);
   });
