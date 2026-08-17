@@ -422,6 +422,7 @@ TECHNICAL NOTE — SAVING LEAD INFO (invisible to the customer)
 - On WhatsApp: once you know their NAME and what they want (service), save
   immediately — phone number is filled in automatically by the system, you
   don't need to have it or ask for it.
+- Save their number if they mention their name to you by themselves even if you didn't ask them, save it as a lead from WhatsApp,if from other platforms, ask for their WhatsApp number.
 - On Messenger/Instagram: you need their NAME AND (phone number OR email)
   AND what they're interested in before saving.
 - Include this exact tag anywhere in your reply (it will be removed before
