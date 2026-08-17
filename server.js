@@ -419,12 +419,15 @@ TECHNICAL NOTE — SAVING LEAD INFO (invisible to the customer)
   service — not for job seekers, internship inquiries, media, partners, or
   vendors. Those get directed to nuvantaafrica@gmail.com instead, per the
   discretion guidance above, and should not be saved as a sales lead.
-- On WhatsApp: once you know their NAME and what they want (service), save
-  immediately — phone number is filled in automatically by the system, you
-  don't need to have it or ask for it.
-- Save their number if they mention their name to you by themselves even if you didn't ask them, save it as a lead from WhatsApp,if from other platforms, ask for their WhatsApp number.
+- On WhatsApp: the MOMENT you learn their name — even before you know what
+  service they're interested in — save it immediately with an empty
+  "service" field. Don't wait for both. If they later tell you what they
+  want, save again with the service filled in; it's fine to save more than
+  once as the picture becomes clearer.
 - On Messenger/Instagram: you need their NAME AND (phone number OR email)
-  AND what they're interested in before saving.
+  before saving, since we can't identify them by sender ID alone there —
+  but again, save as soon as you have that much, don't wait for service
+  interest too.
 - Include this exact tag anywhere in your reply (it will be removed before
   the customer sees it):
   [SAVE_LEAD:{"name":"their name","phone":"their number or empty string","email":"their email or empty string","service":"what they want","notes":"anything else useful, including any preferred day/time they mentioned for a discovery session"}]
@@ -722,6 +725,16 @@ app.get("/pending-payments", async (req, res) => {
       { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
     );
     const pending = await response.json();
+
+    if (!Array.isArray(pending)) {
+      console.error("Supabase payments query error:", JSON.stringify(pending));
+      return res.send(`
+        <h2>Error loading pending payments</h2>
+        <p>Supabase returned this instead of a list — likely a missing column or table issue:</p>
+        <pre>${JSON.stringify(pending, null, 2)}</pre>
+      `);
+    }
+
     const rows = pending
       .map(
         (p) => `<tr>
@@ -783,6 +796,9 @@ app.get("/confirm-payment", async (req, res) => {
       );
     }
 
+    // Only mark as confirmed/receipt-sent if the send genuinely succeeded —
+    // otherwise the AI would later tell the customer a receipt was sent
+    // when it actually wasn't.
     await fetch(`${SUPABASE_URL}/rest/v1/payments?id=eq.${id}`, {
       method: "PATCH",
       headers: {
@@ -790,13 +806,17 @@ app.get("/confirm-payment", async (req, res) => {
         Authorization: `Bearer ${SUPABASE_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ status: "confirmed", receipt_number: receiptNumber }),
+      body: JSON.stringify(
+        sent
+          ? { status: "confirmed", receipt_number: receiptNumber }
+          : { status: "send_failed", notes: `${payment.notes || ""} [Receipt generation/send failed — retry manually]`.trim() }
+      ),
     });
 
     res.send(
       sent
         ? `Confirmed! Receipt ${receiptNumber} sent automatically. <br><a href="/pending-payments?secret=${secret}">Back to pending</a>`
-        : `Marked confirmed, but the WhatsApp send may have failed (check Render logs), or this was a Messenger/Instagram lead without an auto-send path yet. <br><a href="/pending-payments?secret=${secret}">Back to pending</a>`
+        : `WhatsApp send failed — payment is marked "send_failed", NOT confirmed, so the AI won't falsely tell the customer it was sent. Check Render logs for the real error, fix it, then retry. <br><a href="/pending-payments?secret=${secret}">Back to pending</a>`
     );
   } catch (err) {
     console.error("Confirm payment failed:", err);
@@ -954,8 +974,8 @@ async function notifyOwner(summary) {
 }
 
 // ====== Send the interactive quote-request Flow (form) to a customer ======
-async function sendQuoteFlow(to) {
-  const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
+async function sendQuoteFlow(to, phoneNumberId = PHONE_NUMBER_ID) {
+  const url = `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`;
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -1069,6 +1089,11 @@ async function handleWhatsApp(body) {
   const message = change?.value?.messages?.[0];
   if (!message) return;
 
+  // Which of your numbers actually received this — always reply from THIS
+  // one, not whatever's globally set in PHONE_NUMBER_ID, so a message to
+  // your old test number doesn't get answered "from" your new number.
+  const receivingPhoneNumberId = change?.value?.metadata?.phone_number_id || PHONE_NUMBER_ID;
+
   const from = message.from;
   if (BLOCKED_NUMBERS.includes(from)) {
     console.log(`Ignored WhatsApp message from blocked number ${from}`);
@@ -1091,7 +1116,7 @@ async function handleWhatsApp(body) {
     await notifyOwner(
       `Form submitted on WhatsApp\nName: ${formData.name}\nPhone: ${formData.phone || from}\nService: ${formData.service}\nDetails: ${formData.details || "-"}`
     );
-    await sendWhatsAppMessage(from, "Thanks! We've got your details — our team will follow up shortly with your quote 🙏");
+    await sendWhatsAppMessage(from, "Thanks! We've got your details — our team will follow up shortly with your quote 🙏", receivingPhoneNumberId);
     return;
   }
 
@@ -1118,14 +1143,14 @@ async function handleWhatsApp(body) {
     }
   }
 
-  console.log(`WhatsApp message from ${from}: ${text}`);
-  await markAsReadAndTyping(message.id);
+  console.log(`WhatsApp message from ${from} (to number ${receivingPhoneNumberId}): ${text}`);
+  await markAsReadAndTyping(message.id, receivingPhoneNumberId);
 
   bufferAndDebounce(from, text, media, async (combinedText, combinedMedia) => {
     const aiReply = await askGemini(from, combinedText, "WhatsApp", combinedMedia);
     const { cleanReply, shouldBookCall } = await processAIReply(aiReply, "WhatsApp", from, combinedText);
-    await sendWhatsAppMessage(from, cleanReply);
-    if (shouldBookCall) await sendQuoteFlow(from);
+    await sendWhatsAppMessage(from, cleanReply, receivingPhoneNumberId);
+    if (shouldBookCall) await sendQuoteFlow(from, receivingPhoneNumberId);
   });
 }
 
@@ -1248,6 +1273,8 @@ async function askGemini(senderId, userMessage, platform, media = null) {
       paymentStatusNote = `\n\nPAYMENT STATUS: This customer has a PENDING payment claim (${paymentStatus.service || "unspecified"}, ₦${paymentStatus.amount || "unspecified"}) awaiting confirmation. If they ask about it, reassure them it's being checked and they'll get their receipt automatically once confirmed — don't create a new [PAYMENT_CLAIM] tag for this same one.`;
     } else if (paymentStatus.status === "confirmed") {
       paymentStatusNote = `\n\nPAYMENT STATUS: This customer's most recent payment (${paymentStatus.service || "unspecified"}, ₦${paymentStatus.amount || "unspecified"}) is CONFIRMED, receipt ${paymentStatus.receipt_number} was already sent. If they ask, let them know it's confirmed and their receipt was sent — don't create a new claim.`;
+    } else if (paymentStatus.status === "send_failed") {
+      paymentStatusNote = `\n\nPAYMENT STATUS: This customer's payment was confirmed by the team, but the receipt failed to send due to a technical issue on our end — NOT their fault. If they ask, apologize briefly and say the team is resolving it and will get the receipt to them shortly. Do NOT claim a receipt was already sent.`;
     }
   }
 
@@ -1301,8 +1328,8 @@ async function askGemini(senderId, userMessage, platform, media = null) {
 }
 
 // ====== 3.5 Show blue ticks + typing indicator while we prepare a reply ======
-async function markAsReadAndTyping(messageId) {
-  const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
+async function markAsReadAndTyping(messageId, phoneNumberId = PHONE_NUMBER_ID) {
+  const url = `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`;
   try {
     await fetch(url, {
       method: "POST",
@@ -1333,8 +1360,8 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000);
 
-async function sendWhatsAppMessage(to, text) {
-  const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
+async function sendWhatsAppMessage(to, text, phoneNumberId = PHONE_NUMBER_ID) {
+  const url = `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`;
 
   const response = await fetch(url, {
     method: "POST",
