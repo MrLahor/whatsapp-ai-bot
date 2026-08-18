@@ -126,21 +126,38 @@ const WEBSITE_URLS = [
 let cachedWebsiteContent = ""; // filled in automatically, don't edit
 
 async function refreshWebsiteContent() {
+  console.log("Refreshing website content...");
   const pages = [];
   for (const url of WEBSITE_URLS) {
     try {
-      const response = await fetch(url);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout, don't hang forever
+
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; NuvantaBot/1.0; +https://nuvanta.africa)",
+        },
+      });
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        console.error(`Fetch ${url} returned status ${response.status}`);
+        continue;
+      }
+
       const html = await response.text();
       const $ = cheerio.load(html);
       $("script, style, nav, footer").remove(); // strip noise
       const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 4000); // cap length
       pages.push(`--- Content from ${url} ---\n${text}`);
+      console.log(`Fetched ${text.length} characters from ${url}`);
     } catch (err) {
       console.error(`Failed to fetch ${url}:`, err.message);
     }
   }
   cachedWebsiteContent = pages.join("\n\n");
-  console.log("Website content refreshed:", new Date().toISOString());
+  console.log("Website content refreshed:", new Date().toISOString(), `(${cachedWebsiteContent.length} total characters cached)`);
 }
 
 // Fetch once on startup, then refresh every 6 hours
@@ -603,34 +620,77 @@ app.post("/book-session", express.urlencoded({ extended: true }), async (req, re
 // ====== Generate a payment receipt PDF ======
 function generateReceiptPDF({ customerName, service, amount, date, receiptNumber }) {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50 });
+    const doc = new PDFDocument({ size: "A4", margin: 0 });
     const chunks = [];
     doc.on("data", (chunk) => chunks.push(chunk));
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
 
-    doc.fontSize(20).text("Nuvanta Africa", { align: "center" });
-    doc.fontSize(10).fillColor("#555").text("NVA Africa Ltd | RC No: 9666156", { align: "center" });
-    doc.moveDown(2);
+    const brandGreen = "#0F5132";
+    const pageWidth = doc.page.width;
 
-    doc.fontSize(16).fillColor("#000").text("Payment Receipt", { align: "center" });
-    doc.moveDown();
-    doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
-    doc.moveDown();
+    // Header band
+    doc.rect(0, 0, pageWidth, 130).fill(brandGreen);
+    doc.fillColor("#FFFFFF").fontSize(26).font("Helvetica-Bold").text("Nuvanta Africa", 50, 40);
+    doc.fontSize(10).font("Helvetica").text("NVA Africa Ltd  |  RC No: 9666156  |  nuvanta.africa", 50, 75);
+    doc.fontSize(20).font("Helvetica-Bold").text("RECEIPT", pageWidth - 200, 45, { width: 150, align: "right" });
 
-    doc.fontSize(11);
-    doc.text(`Receipt No: ${receiptNumber}`);
-    doc.text(`Date: ${date}`);
-    doc.moveDown();
-    doc.text(`Received from: ${customerName}`);
-    doc.text(`For: ${service}`);
-    doc.moveDown();
+    // Receipt meta box
+    let y = 160;
+    doc.fillColor("#000000").fontSize(10).font("Helvetica");
+    doc.text(`Receipt No:`, 50, y);
+    doc.font("Helvetica-Bold").text(receiptNumber, 150, y);
+    doc.font("Helvetica").text(`Date:`, 350, y);
+    doc.font("Helvetica-Bold").text(date, 400, y);
 
-    doc.fontSize(14).text(`Amount Paid: ₦${amount}`, { align: "left" });
-    doc.moveDown(3);
+    y += 40;
+    doc.moveTo(50, y).lineTo(pageWidth - 50, y).strokeColor("#DDDDDD").stroke();
+    y += 25;
 
-    doc.fontSize(10).fillColor("#555").text("Thank you for your business!", { align: "center" });
-    doc.text("Nuvanta Africa | nuvanta.africa | 08143594483", { align: "center" });
+    // Billed to
+    doc.fontSize(9).fillColor("#888888").font("Helvetica").text("RECEIVED FROM", 50, y);
+    y += 15;
+    doc.fontSize(13).fillColor("#000000").font("Helvetica-Bold").text(customerName || "Customer", 50, y);
+    y += 35;
+
+    // Line item table header
+    doc.rect(50, y, pageWidth - 100, 28).fill("#F2F2F2");
+    doc.fillColor("#555555").fontSize(9).font("Helvetica-Bold");
+    doc.text("DESCRIPTION", 60, y + 9);
+    doc.text("AMOUNT", pageWidth - 160, y + 9, { width: 100, align: "right" });
+    y += 28;
+
+    // Line item row
+    doc.rect(50, y, pageWidth - 100, 32).strokeColor("#EEEEEE").stroke();
+    doc.fillColor("#000000").fontSize(11).font("Helvetica");
+    doc.text(service || "Services rendered", 60, y + 10, { width: pageWidth - 260 });
+    doc.font("Helvetica-Bold").text(`₦${amount}`, pageWidth - 160, y + 10, { width: 100, align: "right" });
+    y += 32;
+
+    // Total band
+    doc.rect(50, y, pageWidth - 100, 40).fill(brandGreen);
+    doc.fillColor("#FFFFFF").fontSize(12).font("Helvetica-Bold");
+    doc.text("TOTAL PAID", 60, y + 13);
+    doc.fontSize(14).text(`₦${amount}`, pageWidth - 160, y + 11, { width: 100, align: "right" });
+    y += 70;
+
+    // Paid stamp
+    doc.save();
+    doc.rotate(-15, { origin: [pageWidth - 150, y] });
+    doc.fontSize(28).fillColor("#0F5132").opacity(0.25).font("Helvetica-Bold");
+    doc.text("PAID", pageWidth - 220, y - 15);
+    doc.restore();
+    doc.opacity(1);
+
+    // Footer
+    const footerY = doc.page.height - 100;
+    doc.moveTo(50, footerY).lineTo(pageWidth - 50, footerY).strokeColor("#DDDDDD").stroke();
+    doc.fillColor("#888888").fontSize(9).font("Helvetica");
+    doc.text("Thank you for your business!", 50, footerY + 15, { align: "center", width: pageWidth - 100 });
+    doc.text("Nuvanta Africa  |  nuvanta.africa  |  08143594483  |  nuvantaafrica@gmail.com", 50, footerY + 30, {
+      align: "center",
+      width: pageWidth - 100,
+    });
 
     doc.end();
   });
@@ -763,6 +823,50 @@ app.get("/pending-payments", async (req, res) => {
 });
 
 // ====== Confirm a payment — generates and sends the receipt automatically ======
+// ====== The actual receipt generation + send logic, reused by both the manual admin page AND the automatic Supabase webhook ======
+async function processPaymentConfirmation(payment) {
+  const receiptNumber = `NVA-${Date.now().toString().slice(-8)}`;
+  const date = new Date().toLocaleDateString("en-GB", { timeZone: "Africa/Lagos" });
+  const claimPhoneNumberId = payment.phone_number_id || PHONE_NUMBER_ID;
+
+  const pdfBuffer = await generateReceiptPDF({
+    customerName: payment.customer_name || "Customer",
+    service: payment.service || "Services rendered",
+    amount: payment.amount || "0",
+    date,
+    receiptNumber,
+  });
+  const mediaId = await uploadWhatsAppMedia(pdfBuffer, "application/pdf", `Receipt-${receiptNumber}.pdf`, claimPhoneNumberId);
+
+  let sent = false;
+  if (mediaId && payment.platform === "WhatsApp") {
+    sent = await sendWhatsAppDocument(
+      payment.phone || payment.sender_id,
+      mediaId,
+      `Receipt-${receiptNumber}.pdf`,
+      `Your payment has been confirmed! Here's your receipt, ${payment.customer_name || ""}. Thank you 🙏`,
+      claimPhoneNumberId
+    );
+  }
+
+  await fetch(`${SUPABASE_URL}/rest/v1/payments?id=eq.${payment.id}`, {
+    method: "PATCH",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(
+      sent
+        ? { status: "confirmed", receipt_number: receiptNumber }
+        : { status: "send_failed", notes: `${payment.notes || ""} [Receipt generation/send failed — retry manually]`.trim() }
+    ),
+  });
+
+  return { sent, receiptNumber };
+}
+
+// ====== Manual admin page — one-click confirm ======
 app.get("/confirm-payment", async (req, res) => {
   const { id, secret } = req.query;
   if (secret !== BROADCAST_SECRET) return res.send("Wrong password.");
@@ -775,46 +879,7 @@ app.get("/confirm-payment", async (req, res) => {
     const payment = rows?.[0];
     if (!payment) return res.send("Payment claim not found.");
 
-    const receiptNumber = `NVA-${Date.now().toString().slice(-8)}`;
-    const date = new Date().toLocaleDateString("en-GB", { timeZone: "Africa/Lagos" });
-    const claimPhoneNumberId = payment.phone_number_id || PHONE_NUMBER_ID;
-
-    const pdfBuffer = await generateReceiptPDF({
-      customerName: payment.customer_name || "Customer",
-      service: payment.service || "Services rendered",
-      amount: payment.amount || "0",
-      date,
-      receiptNumber,
-    });
-    const mediaId = await uploadWhatsAppMedia(pdfBuffer, "application/pdf", `Receipt-${receiptNumber}.pdf`, claimPhoneNumberId);
-
-    let sent = false;
-    if (mediaId && payment.platform === "WhatsApp") {
-      sent = await sendWhatsAppDocument(
-        payment.phone || payment.sender_id,
-        mediaId,
-        `Receipt-${receiptNumber}.pdf`,
-        `Your payment has been confirmed! Here's your receipt, ${payment.customer_name || ""}. Thank you 🙏`,
-        claimPhoneNumberId
-      );
-    }
-
-    // Only mark as confirmed/receipt-sent if the send genuinely succeeded —
-    // otherwise the AI would later tell the customer a receipt was sent
-    // when it actually wasn't.
-    await fetch(`${SUPABASE_URL}/rest/v1/payments?id=eq.${id}`, {
-      method: "PATCH",
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(
-        sent
-          ? { status: "confirmed", receipt_number: receiptNumber }
-          : { status: "send_failed", notes: `${payment.notes || ""} [Receipt generation/send failed — retry manually]`.trim() }
-      ),
-    });
+    const { sent, receiptNumber } = await processPaymentConfirmation(payment);
 
     res.send(
       sent
@@ -824,6 +889,37 @@ app.get("/confirm-payment", async (req, res) => {
   } catch (err) {
     console.error("Confirm payment failed:", err);
     res.send("Something went wrong. Check Render logs.");
+  }
+});
+
+// ====== Automatic trigger — Supabase calls this whenever a payments row ======
+// ====== changes, e.g. when you update status via Lovable's dashboard ======
+app.post("/webhook/payment-confirmed", async (req, res) => {
+  res.sendStatus(200); // acknowledge immediately
+
+  const { type, record, old_record } = req.body;
+  const secretHeader = req.headers["x-webhook-secret"];
+  if (secretHeader !== BROADCAST_SECRET) {
+    console.error("Rejected payment webhook: wrong secret");
+    return;
+  }
+
+  // Only act when status just changed TO "confirmed" and no receipt has
+  // been sent yet — this guard also prevents an infinite loop, since our
+  // own PATCH after sending will trigger this webhook again with
+  // receipt_number already set.
+  if (
+    type === "UPDATE" &&
+    record?.status === "confirmed" &&
+    old_record?.status !== "confirmed" &&
+    !record?.receipt_number
+  ) {
+    console.log(`Auto-triggered receipt for payment id ${record.id} (status changed via dashboard)`);
+    try {
+      await processPaymentConfirmation(record);
+    } catch (err) {
+      console.error("Auto payment confirmation failed:", err);
+    }
   }
 });
 
