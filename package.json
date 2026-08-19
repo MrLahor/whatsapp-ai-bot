@@ -8,7 +8,6 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "cheerio": "^1.0.0",
     "cors": "^2.8.5",
     "pdfkit": "^0.15.0"
   }
