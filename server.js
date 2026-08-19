@@ -2,7 +2,6 @@
 // Flow: WhatsApp message -> this server -> Gemini API -> reply sent back via WhatsApp
 
 const express = require("express");
-const cheerio = require("cheerio");
 const cors = require("cors");
 const PDFDocument = require("pdfkit");
 const app = express();
@@ -131,13 +130,13 @@ async function refreshWebsiteContent() {
   for (const url of WEBSITE_URLS) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout, don't hang forever
+      const timeout = setTimeout(() => controller.abort(), 20000); // rendering takes longer than a plain fetch
 
-      const response = await fetch(url, {
+      // Route through Jina AI's free Reader API — it actually renders the
+      // page (including JavaScript-built sites like React/Next.js) and
+      // returns clean text, instead of us getting an empty HTML shell.
+      const response = await fetch(`https://r.jina.ai/${url}`, {
         signal: controller.signal,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; NuvantaBot/1.0; +https://nuvanta.africa)",
-        },
       });
       clearTimeout(timeout);
 
@@ -146,10 +145,7 @@ async function refreshWebsiteContent() {
         continue;
       }
 
-      const html = await response.text();
-      const $ = cheerio.load(html);
-      $("script, style, nav, footer").remove(); // strip noise
-      const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 4000); // cap length
+      const text = (await response.text()).trim().slice(0, 4000); // cap length
       pages.push(`--- Content from ${url} ---\n${text}`);
       console.log(`Fetched ${text.length} characters from ${url}`);
     } catch (err) {
@@ -1335,7 +1331,7 @@ async function handleInstagram(body) {
 }
 
 async function sendInstagramMessage(recipientId, text) {
-  const url = `https://graph.facebook.com/v21.0/${IG_ACCOUNT_ID}/messages`;
+  const url = `https://graph.instagram.com/v21.0/${IG_ACCOUNT_ID}/messages`;
   const response = await fetch(url, {
     method: "POST",
     headers: {
