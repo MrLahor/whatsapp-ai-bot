@@ -1265,6 +1265,10 @@ async function handleMessenger(body) {
   const senderId = messaging?.sender?.id;
   if (!senderId) return;
 
+  // Ignore echoes of our own sent messages — Meta sends these back to us
+  // for sync purposes, they aren't new customer messages
+  if (messaging?.message?.is_echo) return;
+
   let text = messaging?.message?.text;
   let media = null;
 
@@ -1307,6 +1311,10 @@ async function handleInstagram(body) {
   const messaging = entry?.messaging?.[0];
   const senderId = messaging?.sender?.id;
   if (!senderId) return;
+
+  // Ignore echoes of our own sent messages — Meta sends these back to us
+  // for sync purposes, they aren't new customer messages
+  if (messaging?.message?.is_echo) return;
 
   let text = messaging?.message?.text;
   let media = null;
