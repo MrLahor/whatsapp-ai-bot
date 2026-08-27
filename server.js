@@ -63,7 +63,12 @@ async function getConversation(senderId) {
     const rows = await response.json();
     const row = rows?.[0];
     if (row && now - new Date(row.last_message_time).getTime() < SESSION_TIMEOUT_MS) {
-      const restored = { history: row.history || [], lastMessageTime: new Date(row.last_message_time).getTime() };
+      const restored = {
+        history: row.history || [],
+        lastMessageTime: new Date(row.last_message_time).getTime(),
+        platform: row.platform || null,
+        phoneNumberId: row.phone_number_id || null,
+      };
       conversationCache.set(senderId, restored);
       return restored;
     }
@@ -71,7 +76,7 @@ async function getConversation(senderId) {
     console.error("Failed to load conversation from Supabase:", err);
   }
 
-  const fresh = { history: [], lastMessageTime: now };
+  const fresh = { history: [], lastMessageTime: now, platform: null, phoneNumberId: null };
   conversationCache.set(senderId, fresh);
   return fresh;
 }
@@ -91,6 +96,8 @@ async function saveConversation(senderId, convo) {
         sender_id: senderId,
         history: convo.history,
         last_message_time: new Date(convo.lastMessageTime).toISOString(),
+        platform: convo.platform || null,
+        phone_number_id: convo.phoneNumberId || null,
       }),
     });
   } catch (err) {
@@ -919,6 +926,137 @@ app.post("/webhook/payment-confirmed", async (req, res) => {
   }
 });
 
+// ====== Inbox — see active conversations and reply directly, no template needed ======
+app.get("/inbox", async (req, res) => {
+  if (req.query.secret !== BROADCAST_SECRET) {
+    return res.send('<form>Password: <input type="password" name="secret"><button>View</button></form>');
+  }
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/conversations?platform=eq.WhatsApp&order=last_message_time.desc&limit=50`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    const conversations = await response.json();
+
+    if (!Array.isArray(conversations)) {
+      return res.send(`<h2>Error</h2><pre>${JSON.stringify(conversations, null, 2)}</pre>`);
+    }
+
+    const rows = conversations
+      .map((c) => {
+        const lastMsg = c.history?.[c.history.length - 1]?.parts?.[0]?.text || "(no messages)";
+        const hoursAgo = Math.round((Date.now() - new Date(c.last_message_time).getTime()) / 3600000);
+        const windowOpen = hoursAgo < 24;
+        return `<tr>
+          <td>${c.sender_id}</td>
+          <td style="max-width:400px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${lastMsg}</td>
+          <td>${hoursAgo}h ago</td>
+          <td style="color:${windowOpen ? "green" : "#999"};">${windowOpen ? "Open ✓" : "Closed (needs template)"}</td>
+          <td><a href="/inbox/chat?sender=${encodeURIComponent(c.sender_id)}&secret=${req.query.secret}">Open chat</a></td>
+        </tr>`;
+      })
+      .join("");
+
+    res.send(`
+      <html><body style="font-family: sans-serif;">
+        <h2>Inbox (${conversations.length})</h2>
+        <table border="1" cellpadding="8" style="border-collapse: collapse;">
+          <tr><th>Number</th><th>Last message</th><th>When</th><th>Reply window</th><th></th></tr>
+          ${rows}
+        </table>
+      </body></html>
+    `);
+  } catch (err) {
+    res.send("Error loading inbox: " + err.message);
+  }
+});
+
+app.get("/inbox/chat", async (req, res) => {
+  const { sender, secret } = req.query;
+  if (secret !== BROADCAST_SECRET) return res.send("Wrong password.");
+
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/conversations?sender_id=eq.${encodeURIComponent(sender)}&select=*`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    const rows = await response.json();
+    const convo = rows?.[0];
+    if (!convo) return res.send("Conversation not found.");
+
+    const hoursAgo = Math.round((Date.now() - new Date(convo.last_message_time).getTime()) / 3600000);
+    const windowOpen = hoursAgo < 24;
+
+    const bubbles = (convo.history || [])
+      .map((turn) => {
+        const text = turn.parts?.[0]?.text || "";
+        const isCustomer = turn.role === "user";
+        return `<div style="display:flex; justify-content:${isCustomer ? "flex-start" : "flex-end"}; margin:8px 0;">
+          <div style="max-width:70%; padding:10px 14px; border-radius:12px; background:${isCustomer ? "#f0f0f0" : "#0F5132"}; color:${isCustomer ? "#000" : "#fff"};">
+            ${text.replace(/</g, "&lt;")}
+          </div>
+        </div>`;
+      })
+      .join("");
+
+    res.send(`
+      <html><body style="font-family: sans-serif; max-width: 600px; margin: 20px auto;">
+        <a href="/inbox?secret=${secret}">&larr; Back to inbox</a>
+        <h3>${sender}</h3>
+        <div style="border:1px solid #ddd; border-radius:8px; padding:16px; max-height:500px; overflow-y:auto;">
+          ${bubbles || "<p>No messages yet.</p>"}
+        </div>
+        ${
+          windowOpen
+            ? `<form method="POST" action="/inbox/reply" style="margin-top:16px;">
+                <input type="hidden" name="secret" value="${secret}">
+                <input type="hidden" name="sender" value="${sender}">
+                <textarea name="message" rows="3" style="width:100%; padding:8px;" placeholder="Type your reply..." required></textarea>
+                <button type="submit" style="margin-top:8px; padding:10px 20px;">Send</button>
+              </form>`
+            : `<p style="color:#999; margin-top:16px;">Reply window closed (24h+ since their last message) — use <a href="/send-message">Send Message</a> with an approved template instead.</p>`
+        }
+      </body></html>
+    `);
+  } catch (err) {
+    res.send("Error loading chat: " + err.message);
+  }
+});
+
+app.post("/inbox/reply", express.urlencoded({ extended: true }), async (req, res) => {
+  const { secret, sender, message } = req.body;
+  if (secret !== BROADCAST_SECRET) return res.send("Wrong password.");
+
+  try {
+    const getRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/conversations?sender_id=eq.${encodeURIComponent(sender)}&select=*`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    const rows = await getRes.json();
+    const convo = rows?.[0];
+    const phoneNumberId = convo?.phone_number_id || PHONE_NUMBER_ID;
+
+    const sent = await sendWhatsAppMessage(sender, message, phoneNumberId);
+
+    if (sent && convo) {
+      const history = convo.history || [];
+      history.push({ role: "model", parts: [{ text: message }] });
+      conversationCache.set(sender, {
+        history,
+        lastMessageTime: Date.now(),
+        platform: "WhatsApp",
+        phoneNumberId,
+      });
+      await saveConversation(sender, conversationCache.get(sender));
+    }
+
+    res.redirect(`/inbox/chat?sender=${encodeURIComponent(sender)}&secret=${secret}`);
+  } catch (err) {
+    console.error("Inbox reply failed:", err);
+    res.send("Something went wrong sending your reply. Check Render logs.");
+  }
+});
+
 app.get("/leads", async (req, res) => {
   if (req.query.secret !== CRM_SECRET) {
     return res.send('<form>Password: <input type="password" name="secret"><button>View</button></form>');
@@ -949,6 +1087,21 @@ app.get("/leads", async (req, res) => {
 });
 
 // ====== JSON API — call this from your Lovable dashboard to send a broadcast ======
+// ====== JSON API — send a single message to one customer from your dashboard ======
+app.post("/api/send-message", async (req, res) => {
+  const { secret, number, template, message } = req.body;
+
+  if (secret !== BROADCAST_SECRET) {
+    return res.status(401).json({ error: "Wrong password" });
+  }
+  if (!number || !template) {
+    return res.status(400).json({ error: "Missing number or template" });
+  }
+
+  const success = await sendWhatsAppTemplate(number.trim(), template, message ? [message] : [], TEMPLATE_HEADER_IMAGE || null);
+  res.json({ success });
+});
+
 app.post("/api/broadcast", async (req, res) => {
   const { secret, template, message, numbers } = req.body;
 
@@ -976,6 +1129,41 @@ app.post("/api/broadcast", async (req, res) => {
 });
 
 // ====== Broadcast panel — a simple password-protected page to send to many numbers ======
+// ====== Send a single message to one specific customer (not a broadcast) ======
+app.get("/send-message", (req, res) => {
+  res.send(`
+    <html><body style="font-family: sans-serif; max-width: 500px; margin: 40px auto;">
+      <h2>Send a Message</h2>
+      <p style="color:#666;">For someone outside the 24-hour reply window, this uses an approved template (like broadcast). If they've messaged recently, plain text works too.</p>
+      <form method="POST" action="/send-message">
+        <label>Password<br><input type="password" name="secret" style="width:100%; padding:8px;" required></label><br><br>
+        <label>Their WhatsApp number<br><input type="text" name="number" style="width:100%; padding:8px;" required placeholder="2348143594483"></label><br><br>
+        <label>Template name<br><input type="text" name="template" style="width:100%; padding:8px;" required placeholder="weekly_update"></label><br><br>
+        <label>Your message<br>
+          <textarea name="message" rows="4" style="width:100%; padding:8px;" placeholder="Whatever you want to say to them..."></textarea>
+        </label><br><br>
+        <button type="submit" style="padding:10px 20px;">Send</button>
+      </form>
+    </body></html>
+  `);
+});
+
+app.post("/send-message", express.urlencoded({ extended: true }), async (req, res) => {
+  const { secret, number, template, message } = req.body;
+
+  if (secret !== BROADCAST_SECRET) {
+    return res.send("Wrong password.");
+  }
+
+  const success = await sendWhatsAppTemplate(number.trim(), template, message ? [message] : [], TEMPLATE_HEADER_IMAGE || null);
+
+  res.send(
+    success
+      ? `Sent to ${number}. <br><a href="/send-message">Send another</a>`
+      : `Failed — check Render logs for the exact error. <br><a href="/send-message">Try again</a>`
+  );
+});
+
 app.get("/broadcast-panel", (req, res) => {
   res.send(`
     <html><body style="font-family: sans-serif; max-width: 500px; margin: 40px auto;">
@@ -1242,7 +1430,7 @@ async function handleWhatsApp(body) {
   await markAsReadAndTyping(message.id, receivingPhoneNumberId);
 
   bufferAndDebounce(from, text, media, async (combinedText, combinedMedia) => {
-    const aiReply = await askGemini(from, combinedText, "WhatsApp", combinedMedia);
+    const aiReply = await askGemini(from, combinedText, "WhatsApp", combinedMedia, receivingPhoneNumberId);
     const { cleanReply, shouldBookCall } = await processAIReply(aiReply, "WhatsApp", from, combinedText, receivingPhoneNumberId);
     await sendWhatsAppMessage(from, cleanReply, receivingPhoneNumberId);
     if (shouldBookCall) await sendQuoteFlow(from, receivingPhoneNumberId);
@@ -1356,7 +1544,7 @@ async function sendInstagramMessage(recipientId, text) {
 }
 
 // ====== 3. Ask Gemini for a reply, using this customer's conversation history ======
-async function askGemini(senderId, userMessage, platform, media = null) {
+async function askGemini(senderId, userMessage, platform, media = null, phoneNumberId = null) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
 
   const convo = await getConversation(senderId);
@@ -1425,6 +1613,8 @@ async function askGemini(senderId, userMessage, platform, media = null) {
   convo.history.push({ role: "user", parts: [{ text: userMessage }] });
   convo.history.push({ role: "model", parts: [{ text: finalReply }] });
   convo.lastMessageTime = Date.now();
+  convo.platform = platform;
+  if (phoneNumberId) convo.phoneNumberId = phoneNumberId;
   await saveConversation(senderId, convo);
 
   return finalReply;
