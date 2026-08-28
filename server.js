@@ -68,6 +68,7 @@ async function getConversation(senderId) {
         lastMessageTime: new Date(row.last_message_time).getTime(),
         platform: row.platform || null,
         phoneNumberId: row.phone_number_id || null,
+        humanPausedUntil: row.human_paused_until ? new Date(row.human_paused_until).getTime() : null,
       };
       conversationCache.set(senderId, restored);
       return restored;
@@ -76,7 +77,7 @@ async function getConversation(senderId) {
     console.error("Failed to load conversation from Supabase:", err);
   }
 
-  const fresh = { history: [], lastMessageTime: now, platform: null, phoneNumberId: null };
+  const fresh = { history: [], lastMessageTime: now, platform: null, phoneNumberId: null, humanPausedUntil: null };
   conversationCache.set(senderId, fresh);
   return fresh;
 }
@@ -98,6 +99,7 @@ async function saveConversation(senderId, convo) {
         last_message_time: new Date(convo.lastMessageTime).toISOString(),
         platform: convo.platform || null,
         phone_number_id: convo.phoneNumberId || null,
+        human_paused_until: convo.humanPausedUntil ? new Date(convo.humanPausedUntil).toISOString() : null,
       }),
     });
   } catch (err) {
@@ -947,8 +949,9 @@ app.get("/inbox", async (req, res) => {
         const lastMsg = c.history?.[c.history.length - 1]?.parts?.[0]?.text || "(no messages)";
         const hoursAgo = Math.round((Date.now() - new Date(c.last_message_time).getTime()) / 3600000);
         const windowOpen = hoursAgo < 24;
+        const isPaused = c.human_paused_until && new Date(c.human_paused_until).getTime() > Date.now();
         return `<tr>
-          <td>${c.sender_id}</td>
+          <td>${isPaused ? "🟡" : "🟢"} ${c.sender_id}</td>
           <td style="max-width:400px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${lastMsg}</td>
           <td>${hoursAgo}h ago</td>
           <td style="color:${windowOpen ? "green" : "#999"};">${windowOpen ? "Open ✓" : "Closed (needs template)"}</td>
@@ -960,6 +963,7 @@ app.get("/inbox", async (req, res) => {
     res.send(`
       <html><body style="font-family: sans-serif;">
         <h2>Inbox (${conversations.length})</h2>
+        <p style="color:#666;">🟢 Nova active &nbsp;&nbsp; 🟡 You're handling this one</p>
         <table border="1" cellpadding="8" style="border-collapse: collapse;">
           <tr><th>Number</th><th>Last message</th><th>When</th><th>Reply window</th><th></th></tr>
           ${rows}
@@ -987,6 +991,10 @@ app.get("/inbox/chat", async (req, res) => {
     const hoursAgo = Math.round((Date.now() - new Date(convo.last_message_time).getTime()) / 3600000);
     const windowOpen = hoursAgo < 24;
 
+    const pausedUntil = convo.human_paused_until ? new Date(convo.human_paused_until).getTime() : null;
+    const isPaused = pausedUntil && pausedUntil > Date.now();
+    const pauseMinutesLeft = isPaused ? Math.round((pausedUntil - Date.now()) / 60000) : 0;
+
     const bubbles = (convo.history || [])
       .map((turn) => {
         const text = turn.parts?.[0]?.text || "";
@@ -1003,6 +1011,18 @@ app.get("/inbox/chat", async (req, res) => {
       <html><body style="font-family: sans-serif; max-width: 600px; margin: 20px auto;">
         <a href="/inbox?secret=${secret}">&larr; Back to inbox</a>
         <h3>${sender}</h3>
+        ${
+          isPaused
+            ? `<div style="background:#fff3cd; padding:10px; border-radius:6px; margin-bottom:10px;">
+                🟡 AI paused — you're handling this chat (resumes automatically in ~${pauseMinutesLeft} min)
+                <form method="POST" action="/inbox/resume" style="display:inline;">
+                  <input type="hidden" name="secret" value="${secret}">
+                  <input type="hidden" name="sender" value="${sender}">
+                  <button type="submit" style="margin-left:10px;">Resume AI now</button>
+                </form>
+              </div>`
+            : `<div style="background:#d1e7dd; padding:10px; border-radius:6px; margin-bottom:10px;">🟢 Nova is active on this chat</div>`
+        }
         <div style="border:1px solid #ddd; border-radius:8px; padding:16px; max-height:500px; overflow-y:auto;">
           ${bubbles || "<p>No messages yet.</p>"}
         </div>
@@ -1011,7 +1031,7 @@ app.get("/inbox/chat", async (req, res) => {
             ? `<form method="POST" action="/inbox/reply" style="margin-top:16px;">
                 <input type="hidden" name="secret" value="${secret}">
                 <input type="hidden" name="sender" value="${sender}">
-                <textarea name="message" rows="3" style="width:100%; padding:8px;" placeholder="Type your reply..." required></textarea>
+                <textarea name="message" rows="3" style="width:100%; padding:8px;" placeholder="Type your reply... (this pauses Nova on this chat)" required></textarea>
                 <button type="submit" style="margin-top:8px; padding:10px 20px;">Send</button>
               </form>`
             : `<p style="color:#999; margin-top:16px;">Reply window closed (24h+ since their last message) — use <a href="/send-message">Send Message</a> with an approved template instead.</p>`
@@ -1027,6 +1047,8 @@ app.post("/inbox/reply", express.urlencoded({ extended: true }), async (req, res
   const { secret, sender, message } = req.body;
   if (secret !== BROADCAST_SECRET) return res.send("Wrong password.");
 
+  const HUMAN_PAUSE_MS = 2 * 60 * 60 * 1000; // 2 hours — tweak as you like
+
   try {
     const getRes = await fetch(
       `${SUPABASE_URL}/rest/v1/conversations?sender_id=eq.${encodeURIComponent(sender)}&select=*`,
@@ -1038,14 +1060,15 @@ app.post("/inbox/reply", express.urlencoded({ extended: true }), async (req, res
 
     const sent = await sendWhatsAppMessage(sender, message, phoneNumberId);
 
-    if (sent && convo) {
-      const history = convo.history || [];
+    if (sent) {
+      const history = convo?.history || [];
       history.push({ role: "model", parts: [{ text: message }] });
       conversationCache.set(sender, {
         history,
         lastMessageTime: Date.now(),
         platform: "WhatsApp",
         phoneNumberId,
+        humanPausedUntil: Date.now() + HUMAN_PAUSE_MS,
       });
       await saveConversation(sender, conversationCache.get(sender));
     }
@@ -1054,6 +1077,34 @@ app.post("/inbox/reply", express.urlencoded({ extended: true }), async (req, res
   } catch (err) {
     console.error("Inbox reply failed:", err);
     res.send("Something went wrong sending your reply. Check Render logs.");
+  }
+});
+
+app.post("/inbox/resume", express.urlencoded({ extended: true }), async (req, res) => {
+  const { secret, sender } = req.body;
+  if (secret !== BROADCAST_SECRET) return res.send("Wrong password.");
+
+  try {
+    const getRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/conversations?sender_id=eq.${encodeURIComponent(sender)}&select=*`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    const rows = await getRes.json();
+    const convo = rows?.[0];
+    if (convo) {
+      conversationCache.set(sender, {
+        history: convo.history || [],
+        lastMessageTime: Date.now(),
+        platform: convo.platform || "WhatsApp",
+        phoneNumberId: convo.phone_number_id || PHONE_NUMBER_ID,
+        humanPausedUntil: null,
+      });
+      await saveConversation(sender, conversationCache.get(sender));
+    }
+    res.redirect(`/inbox/chat?sender=${encodeURIComponent(sender)}&secret=${secret}`);
+  } catch (err) {
+    console.error("Resume AI failed:", err);
+    res.send("Something went wrong. Check Render logs.");
   }
 });
 
@@ -1428,6 +1479,19 @@ async function handleWhatsApp(body) {
 
   console.log(`WhatsApp message from ${from} (to number ${receivingPhoneNumberId}): ${text}`);
   await markAsReadAndTyping(message.id, receivingPhoneNumberId);
+
+  // If a human is actively handling this conversation, record the message
+  // so it shows in the inbox, but don't let Nova auto-reply on top of them
+  const convo = await getConversation(from);
+  if (convo.humanPausedUntil && convo.humanPausedUntil > Date.now()) {
+    console.log(`AI paused on ${from} (human handling) — recording message only`);
+    convo.history.push({ role: "user", parts: [{ text }] });
+    convo.lastMessageTime = Date.now();
+    convo.platform = "WhatsApp";
+    convo.phoneNumberId = receivingPhoneNumberId;
+    await saveConversation(from, convo);
+    return;
+  }
 
   bufferAndDebounce(from, text, media, async (combinedText, combinedMedia) => {
     const aiReply = await askGemini(from, combinedText, "WhatsApp", combinedMedia, receivingPhoneNumberId);
