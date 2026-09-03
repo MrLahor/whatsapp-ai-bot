@@ -1047,6 +1047,8 @@ app.post("/inbox/reply", express.urlencoded({ extended: true }), async (req, res
   const { secret, sender, message } = req.body;
   if (secret !== BROADCAST_SECRET) return res.send("Wrong password.");
 
+  console.log(`[INBOX REPLY] Attempting manual reply to ${sender}: ${message}`);
+
   const HUMAN_PAUSE_MS = 2 * 60 * 60 * 1000; // 2 hours — tweak as you like
 
   try {
@@ -1060,17 +1062,24 @@ app.post("/inbox/reply", express.urlencoded({ extended: true }), async (req, res
 
     const sent = await sendWhatsAppMessage(sender, message, phoneNumberId);
 
-    if (sent) {
-      const history = convo?.history || [];
-      history.push({ role: "model", parts: [{ text: message }] });
-      conversationCache.set(sender, {
-        history,
-        lastMessageTime: Date.now(),
-        platform: "WhatsApp",
-        phoneNumberId,
-        humanPausedUntil: Date.now() + HUMAN_PAUSE_MS,
-      });
-      await saveConversation(sender, conversationCache.get(sender));
+    // Pause the AI regardless of send success — you tried to take over this
+    // conversation, so Nova should stay quiet either way. If the send
+    // failed, you'll see that below and can retry, but the pause still holds.
+    const history = convo?.history || [];
+    history.push({ role: "model", parts: [{ text: sent ? message : `[SEND FAILED — attempted]: ${message}` }] });
+    conversationCache.set(sender, {
+      history,
+      lastMessageTime: Date.now(),
+      platform: "WhatsApp",
+      phoneNumberId,
+      humanPausedUntil: Date.now() + HUMAN_PAUSE_MS,
+    });
+    await saveConversation(sender, conversationCache.get(sender));
+
+    if (!sent) {
+      return res.send(
+        `⚠️ The message may not have delivered (check Render logs for the exact error), but Nova is paused on this chat regardless — you can retry sending. <br><a href="/inbox/chat?sender=${encodeURIComponent(sender)}&secret=${secret}">Back to chat</a>`
+      );
     }
 
     res.redirect(`/inbox/chat?sender=${encodeURIComponent(sender)}&secret=${secret}`);
@@ -1139,6 +1148,84 @@ app.get("/leads", async (req, res) => {
 
 // ====== JSON API — call this from your Lovable dashboard to send a broadcast ======
 // ====== JSON API — send a single message to one customer from your dashboard ======
+// ====== JSON API — send a free-text reply from your Lovable chat UI, pauses Nova on that chat ======
+app.post("/api/inbox-reply", async (req, res) => {
+  const { secret, sender, message } = req.body;
+
+  if (secret !== BROADCAST_SECRET) {
+    return res.status(401).json({ error: "Wrong password" });
+  }
+  if (!sender || !message) {
+    return res.status(400).json({ error: "Missing sender or message" });
+  }
+
+  console.log(`[INBOX REPLY - API] Attempting manual reply to ${sender}: ${message}`);
+  const HUMAN_PAUSE_MS = 2 * 60 * 60 * 1000;
+
+  try {
+    const getRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/conversations?sender_id=eq.${encodeURIComponent(sender)}&select=*`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    const rows = await getRes.json();
+    const convo = rows?.[0];
+    const phoneNumberId = convo?.phone_number_id || PHONE_NUMBER_ID;
+
+    const sent = await sendWhatsAppMessage(sender, message, phoneNumberId);
+
+    const history = convo?.history || [];
+    history.push({ role: "model", parts: [{ text: sent ? message : `[SEND FAILED — attempted]: ${message}` }] });
+    conversationCache.set(sender, {
+      history,
+      lastMessageTime: Date.now(),
+      platform: "WhatsApp",
+      phoneNumberId,
+      humanPausedUntil: Date.now() + HUMAN_PAUSE_MS,
+    });
+    await saveConversation(sender, conversationCache.get(sender));
+
+    res.json({ success: sent, paused: true });
+  } catch (err) {
+    console.error("API inbox reply failed:", err);
+    res.status(500).json({ error: "Something went wrong, check Render logs" });
+  }
+});
+
+// ====== JSON API — resume Nova on a paused conversation, from Lovable ======
+app.post("/api/inbox-resume", async (req, res) => {
+  const { secret, sender } = req.body;
+
+  if (secret !== BROADCAST_SECRET) {
+    return res.status(401).json({ error: "Wrong password" });
+  }
+  if (!sender) {
+    return res.status(400).json({ error: "Missing sender" });
+  }
+
+  try {
+    const getRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/conversations?sender_id=eq.${encodeURIComponent(sender)}&select=*`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    const rows = await getRes.json();
+    const convo = rows?.[0];
+    if (convo) {
+      conversationCache.set(sender, {
+        history: convo.history || [],
+        lastMessageTime: Date.now(),
+        platform: convo.platform || "WhatsApp",
+        phoneNumberId: convo.phone_number_id || PHONE_NUMBER_ID,
+        humanPausedUntil: null,
+      });
+      await saveConversation(sender, conversationCache.get(sender));
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error("API inbox resume failed:", err);
+    res.status(500).json({ error: "Something went wrong, check Render logs" });
+  }
+});
+
 app.post("/api/send-message", async (req, res) => {
   const { secret, number, template, message } = req.body;
 
